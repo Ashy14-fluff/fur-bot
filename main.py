@@ -1,5 +1,6 @@
 import os
 import asyncio
+import random
 from datetime import datetime, timezone
 from typing import Optional, List
 
@@ -300,7 +301,7 @@ async def on_ready():
 
 @bot.command()
 async def remember(ctx: commands.Context, *, fact: str):
-    if not ctx.guild:
+    if not ctx.guild and not isinstance(ctx.channel, discord.DMChannel):
         return
     await save_user_fact(str(ctx.author.id), fact)
     await ctx.send("saved that about you 🐾")
@@ -308,9 +309,6 @@ async def remember(ctx: commands.Context, *, fact: str):
 
 @bot.command()
 async def facts(ctx: commands.Context):
-    if not ctx.guild:
-        return
-
     facts_list = await load_user_facts(str(ctx.author.id), limit=8)
     if not facts_list:
         await ctx.send("me don’t know any facts about you yet 🥺")
@@ -322,19 +320,14 @@ async def facts(ctx: commands.Context):
 
 @bot.command()
 async def forgetme(ctx: commands.Context):
-    if not ctx.guild:
-        return
-
     await delete_user_memory(str(ctx.author.id))
     await ctx.send("forgot your stored memory here 🫧")
 
 
 @bot.command()
 async def reset(ctx: commands.Context):
-    if not ctx.guild:
-        return
-
-    await delete_channel_memory(str(ctx.channel.id))
+    channel_id = f"dm_{ctx.author.id}" if isinstance(ctx.channel, discord.DMChannel) else str(ctx.channel.id)
+    await delete_channel_memory(channel_id)
     await ctx.send("channel memory reset 🫧")
 
 
@@ -343,19 +336,18 @@ async def on_message(message: discord.Message):
     if message.author.bot:
         return
 
-    if not message.guild:
-        return
-
     content = message.content.strip()
     if not content:
         return
 
+    # Keep commands working
     if content.startswith("!"):
         await bot.process_commands(message)
         return
 
+    is_dm = message.guild is None
+    channel_id = f"dm_{message.author.id}" if is_dm else str(message.channel.id)
     user_id = str(message.author.id)
-    channel_id = str(message.channel.id)
     display_name = message.author.display_name
 
     await upsert_user_profile(user_id, display_name)
@@ -372,6 +364,9 @@ async def on_message(message: discord.Message):
                     chunk,
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
+
+            if random.random() < 0.20:
+                await message.add_reaction("🐾")
 
         except Exception as e:
             print("Groq/DB error:", repr(e))
