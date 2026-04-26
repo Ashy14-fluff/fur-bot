@@ -1,7 +1,6 @@
 import os
 import asyncio
 import random
-from datetime import datetime, timezone
 from typing import Optional, List, Set
 
 import asyncpg
@@ -17,35 +16,29 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 DATABASE_URL = os.getenv("DATABASE_URL")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
-if not DISCORD_TOKEN or not GROQ_API_KEY or not DATABASE_URL:
+if not all([DISCORD_TOKEN, GROQ_API_KEY, DATABASE_URL]):
     raise RuntimeError("Missing env variables")
 
 groq = Groq(api_key=GROQ_API_KEY)
 
-# ================= STATE =================
+# ================= BOT STATE =================
 bot_owner_id: Optional[int] = None
 admins: Set[str] = set()
 
 SYSTEM_PROMPT = """
-You are Fur Bot 🐾, a cute fluffy AI assistant.
-You are helpful, friendly, emotional, and expressive in soft furry tone (uwu style).
-You must:
-- Remember conversation context
-- Stay consistent per user
-- Be natural and not robotic
-- Be safe and non-explicit
+You are Fur Bot 🐾, a friendly AI companion.
+You are warm, expressive, and remember users across time.
+You use memory when relevant and stay consistent.
 """
 
-# ================= DISCORD =================
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ================= DB =================
 db: Optional[asyncpg.Pool] = None
 lock = asyncio.Lock()
 
-
+# ================= DB INIT =================
 async def init_db():
     global db
     if db:
@@ -55,15 +48,9 @@ async def init_db():
         if db:
             return
 
-        db = await asyncpg.create_pool(DATABASE_URL)
+        db = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
 
         async with db.acquire() as conn:
-            await conn.execute("""
-            CREATE TABLE IF NOT EXISTS admins(
-                user_id TEXT PRIMARY KEY
-            );
-            """)
-
             await conn.execute("""
             CREATE TABLE IF NOT EXISTS messages(
                 id BIGSERIAL PRIMARY KEY,
@@ -82,13 +69,22 @@ async def init_db():
             );
             """)
 
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS memory_summary(
+                id BIGSERIAL PRIMARY KEY,
+                channel_id TEXT,
+                summary TEXT,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            );
+            """)
 
-# ================= ADMIN =================
-async def is_admin(uid: str):
-    return uid in admins or (bot_owner_id and int(uid) == bot_owner_id)
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS admins(
+                user_id TEXT PRIMARY KEY
+            );
+            """)
 
-
-# ================= MEMORY =================
+# ================= MEMORY CORE =================
 async def save_message(channel_id, user_id, role, content):
     async with db.acquire() as conn:
         await conn.execute(
@@ -96,15 +92,17 @@ async def save_message(channel_id, user_id, role, content):
             channel_id, user_id, role, content[:2000]
         )
 
-
 async def load_history(channel_id, limit=25):
     async with db.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT role,content FROM messages WHERE channel_id=$1 ORDER BY id DESC LIMIT $2",
-            channel_id, limit
-        )
-    return list(reversed([{"role": r["role"], "content": r["content"]} for r in rows]))
+        rows = await conn.fetch("""
+            SELECT role, content
+            FROM messages
+            WHERE channel_id=$1
+            ORDER BY id DESC
+            LIMIT $2
+        """, channel_id, limit)
 
+    return list(reversed([{"role": r["role"], "content": r["content"]} for r in rows]))
 
 async def save_fact(user_id, fact):
     async with db.acquire() as conn:
@@ -113,15 +111,79 @@ async def save_fact(user_id, fact):
             user_id, fact[:500]
         )
 
-
 async def load_facts(user_id):
     async with db.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT fact FROM user_facts WHERE user_id=$1 LIMIT 10",
-            user_id
-        )
+        rows = await conn.fetch("""
+            SELECT fact FROM user_facts WHERE user_id=$1 LIMIT 10
+        """, user_id)
     return [r["fact"] for r in rows]
 
+async def load_summaries(channel_id):
+    async with db.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT summary FROM memory_summary
+            WHERE channel_id=$1
+            ORDER BY id DESC
+            LIMIT 5
+        """, channel_id)
+    return [r["summary"] for r in rows]
+
+# ================= MEMORY SUMMARIZER =================
+async def save_summary(channel_id):
+    history = await load_history(channel_id, limit=40)
+
+    if not history:
+        return
+
+    text = "\n".join([f"{m['role']}: {m['content']}" for m in history])
+
+    prompt = [
+        {"role": "system", "content": "Summarize this conversation into key long-term memory points."},
+        {"role": "user", "content": text}
+    ]
+
+    def run():
+        res = groq.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=prompt,
+            temperature=0.3,
+            max_tokens=300
+        )
+        return res.choices[0].message.content
+
+    summary = await asyncio.to_thread(run)
+
+    async with db.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO memory_summary(channel_id,summary) VALUES($1,$2)",
+            channel_id, summary[:2000]
+        )
+
+# ================= CONTEXT BUILDER =================
+async def build_context(channel_id, user_id, username):
+    history = await load_history(channel_id)
+    facts = await load_facts(user_id)
+    summaries = await load_summaries(channel_id)
+
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": f"Current user: {username}"}
+    ]
+
+    if summaries:
+        messages.append({
+            "role": "system",
+            "content": "Long-term memory:\n" + "\n\n".join(summaries)
+        })
+
+    if facts:
+        messages.append({
+            "role": "system",
+            "content": "User facts:\n- " + "\n- ".join(facts)
+        })
+
+    messages.extend(history)
+    return messages
 
 # ================= AI =================
 async def ask_ai(messages):
@@ -136,66 +198,13 @@ async def ask_ai(messages):
 
     return await asyncio.to_thread(run)
 
-
-# ================= CONTEXT BUILDER =================
-async def build_context(channel_id, user_id, username):
-    history = await load_history(channel_id)
-    facts = await load_facts(user_id)
-
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "system", "content": f"User: {username}"},
-    ]
-
-    if facts:
-        messages.append({
-            "role": "system",
-            "content": "User memory:\n- " + "\n- ".join(facts)
-        })
-
-    messages.extend(history)
-    return messages
-
-
 # ================= EVENTS =================
 @bot.event
 async def on_ready():
     global bot_owner_id
     await init_db()
     bot_owner_id = (await bot.application_info()).owner.id
-    print(f"Bot ready 🐾 | Owner: {bot_owner_id}")
-
-
-# ================= ADMIN COMMANDS =================
-@bot.command()
-async def addadmin(ctx, member: discord.Member):
-    if not await is_admin(str(ctx.author.id)):
-        return await ctx.send("no permission 🥺")
-
-    async with db.acquire() as conn:
-        await conn.execute("INSERT INTO admins(user_id) VALUES($1) ON CONFLICT DO NOTHING", str(member.id))
-
-    admins.add(str(member.id))
-    await ctx.send("admin added 🐾")
-
-
-@bot.command()
-async def kick(ctx, member: discord.Member):
-    if not await is_admin(str(ctx.author.id)):
-        return await ctx.send("no permission 🥺")
-
-    await member.kick()
-    await ctx.send("kicked 🐾")
-
-
-@bot.command()
-async def ban(ctx, member: discord.Member):
-    if not await is_admin(str(ctx.author.id)):
-        return await ctx.send("no permission 🥺")
-
-    await member.ban()
-    await ctx.send("banned 💢")
-
+    print(f"Bot ready 🐾 | Memory system ACTIVE")
 
 # ================= CHAT =================
 @bot.event
@@ -219,8 +228,12 @@ async def on_message(message):
 
         await save_message(channel_id, user_id, "assistant", reply)
 
+        # 🔥 AUTO MEMORY COMPRESSION (THIS FIXES FORGETTING)
+        if random.random() < 0.12:
+            await save_summary(channel_id)
+
         for chunk in [reply[i:i+1900] for i in range(0, len(reply), 1900)]:
             await message.channel.send(chunk)
 
-
+# ================= RUN =================
 bot.run(DISCORD_TOKEN)
