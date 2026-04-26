@@ -1,128 +1,378 @@
 import os
 import asyncio
-from dotenv import load_dotenv
+import random
+from datetime import datetime, timezone
+from typing import Optional, List
+
+import asyncpg
 import discord
 from discord.ext import commands
-import asyncpg
+from dotenv import load_dotenv
 from groq import Groq
 
 load_dotenv()
 
-# REQUIRED ENV VARS
-TOKEN = os.getenv("DISCORD_TOKEN")
-GROQ_KEY = os.getenv("GROQ_API_KEY")
-DB_URL = os.getenv("DATABASE_URL")
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+DATABASE_URL = os.getenv("DATABASE_URL")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
-if not all([TOKEN, GROQ_KEY, DB_URL]):
-    print("❌ MISSING ENV VARS!")
-    exit(1)
+if not DISCORD_TOKEN:
+    raise RuntimeError("DISCORD_TOKEN is missing.")
+if not GROQ_API_KEY:
+    raise RuntimeError("GROQ_API_KEY is missing.")
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL is missing.")
 
-print("✅ All env vars OK")
+groq_client = Groq(api_key=GROQ_API_KEY)
 
-# ✅ HARDCODED WORKING MODEL - NO .env OVERRIDE
-client = Groq(api_key=GROQ_KEY)
+SYSTEM_PROMPT = (
+    "You are Fur Bot 🐾, a cute fluffy Discord AI companion. "
+    "You speak in a soft furry style with occasional uwu, >w<, mrrp, and cute reactions, "
+    "but you must stay readable and helpful. "
+    "You remember recent conversation context and persistent user facts. "
+    "You are warm, playful, emotionally aware, and natural. "
+    "Do not be robotic."
+)
 
 intents = discord.Intents.default()
 intents.message_content = True
+
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-db_pool = None
+db_pool: Optional[asyncpg.Pool] = None
+db_lock = asyncio.Lock()
 
-async def setup_db():
+
+async def init_db() -> None:
     global db_pool
-    db_pool = await asyncpg.create_pool(DB_URL)
-    async with db_pool.acquire() as conn:
-        await conn.execute('''
-            CREATE TABLE IF NOT EXISTS chat (
-                id SERIAL PRIMARY KEY,
-                channel_id TEXT NOT NULL,
-                user_id TEXT NOT NULL,
-                role TEXT NOT NULL,
-                content TEXT NOT NULL,
-                timestamp TIMESTAMP DEFAULT NOW()
-            )
-        ''')
+    if db_pool is not None:
+        return
 
-SYSTEM_PROMPT = "You are Fur Bot 🐾! Cute, friendly, fluffy AI. Use uwu/mrrp sometimes. Be helpful!"
+    async with db_lock:
+        if db_pool is not None:
+            return
+
+        db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
+
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_profiles (
+                    user_id TEXT PRIMARY KEY,
+                    display_name TEXT NOT NULL,
+                    first_seen TIMESTAMPTZ NOT NULL,
+                    last_seen TIMESTAMPTZ NOT NULL
+                );
+                """
+            )
+
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS messages (
+                    id BIGSERIAL PRIMARY KEY,
+                    channel_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                """
+            )
+
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_facts (
+                    id BIGSERIAL PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    fact TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                """
+            )
+
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_messages_channel_id_id ON messages(channel_id, id);"
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_messages_user_id_id ON messages(user_id, id);"
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_user_facts_user_id_id ON user_facts(user_id, id);"
+            )
+
+
+async def upsert_user_profile(user_id: str, display_name: str) -> None:
+    await init_db()
+    assert db_pool is not None
+
+    now = datetime.now(timezone.utc)
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO user_profiles (user_id, display_name, first_seen, last_seen)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (user_id)
+            DO UPDATE SET display_name = EXCLUDED.display_name,
+                          last_seen = EXCLUDED.last_seen;
+            """,
+            user_id,
+            display_name,
+            now,
+            now,
+        )
+
+
+async def save_message(channel_id: str, user_id: str, role: str, content: str) -> None:
+    await init_db()
+    assert db_pool is not None
+
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO messages (channel_id, user_id, role, content)
+            VALUES ($1, $2, $3, $4);
+            """,
+            channel_id,
+            user_id,
+            role,
+            content[:4000],
+        )
+
+
+async def load_channel_history(channel_id: str, limit: int = 14) -> List[dict]:
+    await init_db()
+    assert db_pool is not None
+
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT role, content
+            FROM messages
+            WHERE channel_id = $1
+            ORDER BY id DESC
+            LIMIT $2;
+            """,
+            channel_id,
+            limit,
+        )
+
+    rows = list(reversed(rows))
+    return [{"role": row["role"], "content": row["content"]} for row in rows]
+
+
+async def load_user_facts(user_id: str, limit: int = 8) -> List[str]:
+    await init_db()
+    assert db_pool is not None
+
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT fact
+            FROM user_facts
+            WHERE user_id = $1
+            ORDER BY id DESC
+            LIMIT $2;
+            """,
+            user_id,
+            limit,
+        )
+
+    rows = list(reversed(rows))
+    return [row["fact"] for row in rows]
+
+
+async def get_user_profile(user_id: str):
+    await init_db()
+    assert db_pool is not None
+
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT user_id, display_name, first_seen, last_seen
+            FROM user_profiles
+            WHERE user_id = $1;
+            """,
+            user_id,
+        )
+    return row
+
+
+async def save_user_fact(user_id: str, fact: str) -> None:
+    await init_db()
+    assert db_pool is not None
+
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO user_facts (user_id, fact)
+            VALUES ($1, $2);
+            """,
+            user_id,
+            fact[:1000],
+        )
+
+
+async def delete_user_memory(user_id: str) -> None:
+    await init_db()
+    assert db_pool is not None
+
+    async with db_pool.acquire() as conn:
+        await conn.execute("DELETE FROM messages WHERE user_id = $1;", user_id)
+        await conn.execute("DELETE FROM user_facts WHERE user_id = $1;", user_id)
+        await conn.execute("DELETE FROM user_profiles WHERE user_id = $1;", user_id)
+
+
+async def delete_channel_memory(channel_id: str) -> None:
+    await init_db()
+    assert db_pool is not None
+
+    async with db_pool.acquire() as conn:
+        await conn.execute("DELETE FROM messages WHERE channel_id = $1;", channel_id)
+
+
+def split_message(text: str, limit: int = 1900):
+    text = text or ""
+    if not text.strip():
+        return ["mrrp... empty reply 🥺"]
+    return [text[i:i + limit] for i in range(0, len(text), limit)]
+
+
+async def build_context(channel_id: str, user_id: str, display_name: str) -> List[dict]:
+    profile = await get_user_profile(user_id)
+    facts = await load_user_facts(user_id, limit=8)
+    channel_history = await load_channel_history(channel_id, limit=14)
+
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {
+            "role": "system",
+            "content": (
+                f"Current user display name: {display_name}. "
+                f"Use the stored long-term memory below when relevant."
+            ),
+        },
+    ]
+
+    if profile:
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "Persistent user profile: "
+                    f"user_id={profile['user_id']}; "
+                    f"display_name={profile['display_name']}; "
+                    f"first_seen={profile['first_seen']}; "
+                    f"last_seen={profile['last_seen']}."
+                ),
+            }
+        )
+
+    if facts:
+        messages.append(
+            {
+                "role": "system",
+                "content": "Persistent facts about this user:\n- " + "\n- ".join(facts),
+            }
+        )
+
+    messages.extend(channel_history)
+    return messages
+
+
+async def ask_ai(messages: List[dict]) -> str:
+    def call_groq():
+        completion = groq_client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=messages,
+            temperature=0.9,
+        )
+        return completion.choices[0].message.content or ""
+
+    return await asyncio.to_thread(call_groq)
+
 
 @bot.event
 async def on_ready():
-    await setup_db()
-    print(f'✅ {bot.user} is online! 🐾')
+    await init_db()
+    print(f"Logged in as {bot.user}")
+    await bot.change_presence(activity=discord.Game(name="fluffy chats 🐾"))
+
 
 @bot.command()
-async def ping(ctx):
-    await ctx.send('Pong! 🐾')
+async def remember(ctx: commands.Context, *, fact: str):
+    if not ctx.guild and not isinstance(ctx.channel, discord.DMChannel):
+        return
+    await save_user_fact(str(ctx.author.id), fact)
+    await ctx.send("saved that about you 🐾")
 
-async def chat_ai(messages):
-    """Direct Groq call with WORKING model"""
-    try:
-        response = await asyncio.to_thread(
-            client.chat.completions.create,
-            model="llama3-70b-8192",  # ✅ KNOWN WORKING
-            messages=messages,
-            temperature=0.7,
-            max_tokens=800
-        )
-        return response.choices[0].message.content or "mrrp?"
-    except Exception as e:
-        print(f"Groq error: {e}")
-        return "mrrp… AI nap time 🥺"
 
-async def get_history(channel_id, limit=6):
-    if not db_pool: return []
-    async with db_pool.acquire() as conn:
-        rows = await conn.fetch(
-            'SELECT role, content FROM chat WHERE channel_id=$1 ORDER BY timestamp DESC LIMIT $2',
-            channel_id, limit
-        )
-    return [{'role': r['role'], 'content': r['content']} for r in reversed(rows)]
+@bot.command()
+async def facts(ctx: commands.Context):
+    facts_list = await load_user_facts(str(ctx.author.id), limit=8)
+    if not facts_list:
+        await ctx.send("me don’t know any facts about you yet 🥺")
+        return
 
-async def save_chat(channel_id, user_id, role, content):
-    if not db_pool: return
-    async with db_pool.acquire() as conn:
-        await conn.execute(
-            'INSERT INTO chat (channel_id, user_id, role, content) VALUES ($1, $2, $3, $4)',
-            channel_id, user_id, role, content[:1000]
-        )
+    text = "\n".join(f"• {f}" for f in facts_list)
+    await ctx.send(f"what me remember about you:\n{text}")
+
+
+@bot.command()
+async def forgetme(ctx: commands.Context):
+    await delete_user_memory(str(ctx.author.id))
+    await ctx.send("forgot your stored memory here 🫧")
+
+
+@bot.command()
+async def reset(ctx: commands.Context):
+    channel_id = f"dm_{ctx.author.id}" if isinstance(ctx.channel, discord.DMChannel) else str(ctx.channel.id)
+    await delete_channel_memory(channel_id)
+    await ctx.send("channel memory reset 🫧")
+
 
 @bot.event
-async def on_message(msg):
-    if msg.author.bot or not msg.content.strip():
+async def on_message(message: discord.Message):
+    if message.author.bot:
         return
-    
-    if msg.content.startswith('!'):
-        await bot.process_commands(msg)
-        return
-    
-    print(f"🐾 {msg.author}: {msg.content}")
-    
-    try:
-        # Get recent chat
-        history = await get_history(str(msg.channel.id))
-        
-        # Build prompt
-        ai_msgs = [
-            {'role': 'system', 'content': SYSTEM_PROMPT},
-            *history,
-            {'role': 'user', 'content': msg.content}
-        ]
-        
-        # Get AI reply
-        reply = await chat_ai(ai_msgs)
-        
-        # Save conversation
-        await save_chat(str(msg.channel.id), str(msg.author.id), 'user', msg.content)
-        await save_chat(str(msg.channel.id), str(bot.user.id), 'assistant', reply)
-        
-        # Send reply
-        await msg.reply(reply)
-        
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        await msg.reply("mrrp… technical difficulties 🥺")
-    
-    await bot.process_commands(msg)
 
-if __name__ == "__main__":
-    bot.run(TOKEN)
+    content = message.content.strip()
+    if not content:
+        return
+
+    # Keep commands working
+    if content.startswith("!"):
+        await bot.process_commands(message)
+        return
+
+    is_dm = message.guild is None
+    channel_id = f"dm_{message.author.id}" if is_dm else str(message.channel.id)
+    user_id = str(message.author.id)
+    display_name = message.author.display_name
+
+    await upsert_user_profile(user_id, display_name)
+    await save_message(channel_id, user_id, "user", content)
+
+    async with message.channel.typing():
+        try:
+            context = await build_context(channel_id, user_id, display_name)
+            reply = await ask_ai(context)
+            await save_message(channel_id, user_id, "assistant", reply)
+
+            for chunk in split_message(reply):
+                await message.channel.send(
+                    chunk,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+
+            if random.random() < 0.20:
+                await message.add_reaction("🐾")
+
+        except Exception as e:
+            print("Groq/DB error:", repr(e))
+            await message.channel.send("oopsie, me hit an error 🥺")
+
+    await bot.process_commands(message)
+
+
+bot.run(DISCORD_TOKEN)
