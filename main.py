@@ -23,7 +23,7 @@ if not DISCORD_TOKEN or not GROQ_API_KEY or not DATABASE_URL:
 groq_client = Groq(api_key=GROQ_API_KEY)
 
 # === Settings ===
-lewd_level: int = 1  # 0 safe, 1 flirty, 2 explicit, 3 very kinky
+lewd_level: int = 1
 bot_owner_id: Optional[int] = None
 admins: Set[str] = set()
 
@@ -55,32 +55,73 @@ async def init_db() -> None:
             return
         db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
         async with db_pool.acquire() as conn:
-            # existing tables...
-            await conn.execute("""CREATE TABLE IF NOT EXISTS user_profiles (user_id TEXT PRIMARY KEY, display_name TEXT NOT NULL, first_seen TIMESTAMPTZ NOT NULL, last_seen TIMESTAMPTZ NOT NULL);""")
-            await conn.execute("""CREATE TABLE IF NOT EXISTS messages (id BIGSERIAL PRIMARY KEY, channel_id TEXT NOT NULL, user_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());""")
-            await conn.execute("""CREATE TABLE IF NOT EXISTS user_facts (id BIGSERIAL PRIMARY KEY, user_id TEXT NOT NULL, fact TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());""")
-            await conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_channel_id_id ON messages(channel_id, id);")
-            await conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_user_id_id ON messages(user_id, id);")
-            await conn.execute("CREATE INDEX IF NOT EXISTS idx_user_facts_user_id_id ON user_facts(user_id, id);")
-            # admin table
-            await conn.execute("""CREATE TABLE IF NOT EXISTS admins (user_id TEXT PRIMARY KEY, added_at TIMESTAMPTZ NOT NULL DEFAULT NOW());""")
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_profiles (
+                    user_id TEXT PRIMARY KEY,
+                    display_name TEXT NOT NULL,
+                    first_seen TIMESTAMPTZ NOT NULL,
+                    last_seen TIMESTAMPTZ NOT NULL
+                );
+                """
+            )
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS messages (
+                    id BIGSERIAL PRIMARY KEY,
+                    channel_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                """
+            )
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_facts (
+                    id BIGSERIAL PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    fact TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                """
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_messages_channel_id_id ON messages(channel_id, id);"
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_messages_user_id_id ON messages(user_id, id);"
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_user_facts_user_id_id ON user_facts(user_id, id);"
+            )
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS admins (
+                    user_id TEXT PRIMARY KEY,
+                    added_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                """
+            )
 
 
 async def load_admins() -> None:
     global admins
     await init_db()
+    assert db_pool is not None
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("SELECT user_id FROM admins;")
         admins = {row["user_id"] for row in rows}
 
 
 async def is_admin(user_id: str) -> bool:
-    return user_id in admins or int(user_id) == bot_owner_id
+    return user_id in admins or (bot_owner_id is not None and int(user_id) == bot_owner_id)
 
 
-# === Admin management ===
 async def add_admin(user_id: str) -> bool:
     await init_db()
+    assert db_pool is not None
     async with db_pool.acquire() as conn:
         try:
             await conn.execute("INSERT INTO admins (user_id) VALUES ($1);", user_id)
@@ -92,27 +133,178 @@ async def add_admin(user_id: str) -> bool:
 
 async def remove_admin(user_id: str) -> bool:
     await init_db()
+    assert db_pool is not None
     async with db_pool.acquire() as conn:
         result = await conn.execute("DELETE FROM admins WHERE user_id = $1;", user_id)
-        if "0" not in result:
+        if result.split()[-1] != "0":
             admins.discard(user_id)
             return True
         return False
 
 
-# === Your existing DB functions (upsert, save_message, etc.) ===
-# (I kept them exactly as yuw had, just make sure to include all of them below this comment)
+async def upsert_user_profile(user_id: str, display_name: str) -> None:
+    await init_db()
+    assert db_pool is not None
+    now = datetime.now(timezone.utc)
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO user_profiles (user_id, display_name, first_seen, last_seen)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (user_id)
+            DO UPDATE SET display_name = EXCLUDED.display_name,
+                          last_seen = EXCLUDED.last_seen;
+            """,
+            user_id, display_name, now, now,
+        )
 
-# paste yuwr upsert_user_profile, save_message, load_channel_history, load_user_facts,
-# get_user_profile, save_user_fact, delete_user_memory, delete_channel_memory, split_message here...
 
-# (to save space me didn't repeat dem all, but yuw can copy dem fwom yuwr last message)
+async def save_message(channel_id: str, user_id: str, role: str, content: str) -> None:
+    await init_db()
+    assert db_pool is not None
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO messages (channel_id, user_id, role, content)
+            VALUES ($1, $2, $3, $4);
+            """,
+            channel_id, user_id, role, content[:4000],
+        )
 
-async def build_context(...):  # keep yuwr build_context
-    ...
 
-async def ask_ai(...):  # keep yuwr ask_ai
-    ...
+async def load_channel_history(channel_id: str, limit: int = 14) -> List[dict]:
+    await init_db()
+    assert db_pool is not None
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT role, content
+            FROM messages
+            WHERE channel_id = $1
+            ORDER BY id DESC
+            LIMIT $2;
+            """,
+            channel_id, limit,
+        )
+    rows = list(reversed(rows))
+    return [{"role": row["role"], "content": row["content"]} for row in rows]
+
+
+async def load_user_facts(user_id: str, limit: int = 8) -> List[str]:
+    await init_db()
+    assert db_pool is not None
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT fact
+            FROM user_facts
+            WHERE user_id = $1
+            ORDER BY id DESC
+            LIMIT $2;
+            """,
+            user_id, limit,
+        )
+    rows = list(reversed(rows))
+    return [row["fact"] for row in rows]
+
+
+async def get_user_profile(user_id: str):
+    await init_db()
+    assert db_pool is not None
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT user_id, display_name, first_seen, last_seen
+            FROM user_profiles
+            WHERE user_id = $1;
+            """,
+            user_id,
+        )
+    return row
+
+
+async def save_user_fact(user_id: str, fact: str) -> None:
+    await init_db()
+    assert db_pool is not None
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO user_facts (user_id, fact)
+            VALUES ($1, $2);
+            """,
+            user_id, fact[:1000],
+        )
+
+
+async def delete_user_memory(user_id: str) -> None:
+    await init_db()
+    assert db_pool is not None
+    async with db_pool.acquire() as conn:
+        await conn.execute("DELETE FROM messages WHERE user_id = $1;", user_id)
+        await conn.execute("DELETE FROM user_facts WHERE user_id = $1;", user_id)
+        await conn.execute("DELETE FROM user_profiles WHERE user_id = $1;", user_id)
+
+
+async def delete_channel_memory(channel_id: str) -> None:
+    await init_db()
+    assert db_pool is not None
+    async with db_pool.acquire() as conn:
+        await conn.execute("DELETE FROM messages WHERE channel_id = $1;", channel_id)
+
+
+def split_message(text: str, limit: int = 1900) -> List[str]:
+    text = text or ""
+    if not text.strip():
+        return ["mrrp~ me don’t know what to say... 🥺"]
+    return [text[i:i + limit] for i in range(0, len(text), limit)]
+
+
+async def build_context(channel_id: str, user_id: str, display_name: str) -> List[dict]:
+    profile = await get_user_profile(user_id)
+    facts = await load_user_facts(user_id, limit=8)
+    channel_history = await load_channel_history(channel_id, limit=14)
+
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": f"Current lewd level: {lewd_level}/3 (0=safe & cute, 3=very kinky)"},
+        {"role": "system", "content": f"Current user display name: {display_name}."},
+    ]
+
+    if profile:
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "Persistent user profile: "
+                    f"user_id={profile['user_id']}; "
+                    f"display_name={profile['display_name']}; "
+                    f"first_seen={profile['first_seen']}; "
+                    f"last_seen={profile['last_seen']}."
+                ),
+            }
+        )
+    if facts:
+        messages.append(
+            {
+                "role": "system",
+                "content": "Persistent facts about this user:\n- " + "\n- ".join(facts),
+            }
+        )
+
+    messages.extend(channel_history)
+    return messages
+
+
+async def ask_ai(messages: List[dict]) -> str:
+    def call_groq():
+        completion = groq_client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=messages,
+            temperature=0.85 + (lewd_level * 0.05),
+            max_tokens=900,
+        )
+        return completion.choices[0].message.content or "mrrp... me brain went all floofy 🥺"
+    return await asyncio.to_thread(call_groq)
 
 
 @bot.event
@@ -159,7 +351,7 @@ async def admins(ctx):
     await ctx.send("current admins:\n" + "\n".join(mentions))
 
 
-# === Moderation Commands (only admins) ===
+# === Moderation Commands ===
 @bot.command()
 async def kick(ctx, member: discord.Member = None, *, reason: str = None):
     if not await is_admin(str(ctx.author.id)):
@@ -197,11 +389,10 @@ async def mute(ctx, member: discord.Member = None, duration: str = None, *, reas
     if not member or not duration:
         return await ctx.send("use: !mute @user 10m [reason]")
 
-    # simple time parser
     unit = duration[-1].lower()
     try:
         value = int(duration[:-1])
-    except:
+    except ValueError:
         return await ctx.send("time must be like 10m, 2h, 1d~")
 
     if unit == "s": secs = value
@@ -211,7 +402,7 @@ async def mute(ctx, member: discord.Member = None, duration: str = None, *, reas
     else:
         return await ctx.send("use s/m/h/d only~")
 
-    if secs > 2419200:  # 28 days max
+    if secs > 2419200:
         return await ctx.send("max timeout is 28 days~")
 
     try:
@@ -219,7 +410,7 @@ async def mute(ctx, member: discord.Member = None, duration: str = None, *, reas
         await member.timeout(until, reason=reason or f"Muted by {ctx.author}")
         await ctx.send(f"muted {member.mention} fow {duration}~ quiet time~ 🐾")
     except discord.Forbidden:
-        await ctx.send("me no have timeout permission... give me Moderate Members powew pwease~")
+        await ctx.send("me no have Moderate Members permission... give me powew pwease~")
     except Exception:
         await ctx.send("oopsie, mute failed 🥺")
 
@@ -239,20 +430,19 @@ async def unmute(ctx, member: discord.Member = None):
         await ctx.send("oopsie, unmute failed 🥺")
 
 
-# === Lewd commands (admin only now) ===
+# === Lewd Commands (admin only) ===
 @bot.command()
 async def nsfw(ctx, mode: str = "on"):
     global lewd_level
     if not await is_admin(str(ctx.author.id)):
         return await ctx.send("only admins can change nsfw mode... sowwy >w<")
-    # ... (yuwr old nsfw code)
     mode = mode.lower()
     if mode == "on":
         lewd_level = max(lewd_level, 2)
         await ctx.send("NSFW mode **ON**~ vewy naughty now >w< 💕")
     elif mode == "off":
         lewd_level = 1
-        await ctx.send("NSFW mode **OFF**~ cute floof again uwu~")
+        await ctx.send("NSFW mode **OFF**~ back to cute floof uwu~")
     else:
         await ctx.send("use !nsfw on / off~")
 
@@ -262,7 +452,6 @@ async def lewd(ctx, level: int = None):
     global lewd_level
     if not await is_admin(str(ctx.author.id)):
         return await ctx.send("only admins can change lewd level uwu")
-    # ... (yuwr old lewd code)
     if level is None:
         return await ctx.send(f"current lewd level **{lewd_level}/3** 🐾")
     if 0 <= level <= 3:
@@ -270,10 +459,38 @@ async def lewd(ctx, level: int = None):
         msg = "me feel extra naughty now >w<" if level >= 2 else "set~"
         await ctx.send(f"lewd level set to **{level}**~ {msg}")
     else:
-        await ctx.send("0-3 only~")
+        await ctx.send("level must be 0-3~")
 
 
-# keep yuwr remember, facts, forgetme, reset (updated to respect admin if yuw want)
+@bot.command()
+async def remember(ctx, *, fact: str):
+    await save_user_fact(str(ctx.author.id), fact)
+    await ctx.send("saved that about you 🐾")
+
+
+@bot.command()
+async def facts(ctx):
+    facts_list = await load_user_facts(str(ctx.author.id), limit=8)
+    if not facts_list:
+        await ctx.send("me don’t know any facts about you yet 🥺")
+        return
+    text = "\n".join(f"• {f}" for f in facts_list)
+    await ctx.send(f"what me remember about you:\n{text}")
+
+
+@bot.command()
+async def forgetme(ctx):
+    await delete_user_memory(str(ctx.author.id))
+    await ctx.send("forgot your stored memory here 🫧")
+
+
+@bot.command()
+async def reset(ctx):
+    is_dm = ctx.guild is None
+    channel_id = f"dm_{ctx.author.id}" if is_dm else str(ctx.channel.id)
+    await delete_channel_memory(channel_id)
+    await ctx.send("channel memory reset 🫧 me ready for new fun~")
+
 
 @bot.event
 async def on_message(message: discord.Message):
@@ -285,6 +502,34 @@ async def on_message(message: discord.Message):
     if content.startswith("!"):
         await bot.process_commands(message)
         return
-    # ... yuwr normal on_message handling (save, reply, reactions) stays da same
+
+    is_dm = message.guild is None
+    channel_id = f"dm_{message.author.id}" if is_dm else str(message.channel.id)
+    user_id = str(message.author.id)
+    display_name = message.author.display_name
+
+    await upsert_user_profile(user_id, display_name)
+    await save_message(channel_id, user_id, "user", content)
+
+    async with message.channel.typing():
+        try:
+            context = await build_context(channel_id, user_id, display_name)
+            reply = await ask_ai(context)
+            await save_message(channel_id, user_id, "assistant", reply)
+
+            for chunk in split_message(reply):
+                await message.channel.send(
+                    chunk,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+
+            if random.random() < 0.25:
+                await message.add_reaction("🐾")
+            if lewd_level >= 2 and random.random() < 0.18:
+                await message.add_reaction("💦")
+        except Exception as e:
+            print("Groq/DB error:", repr(e))
+            await message.channel.send("oopsie, me hit an error 🥺")
+
 
 bot.run(DISCORD_TOKEN)
