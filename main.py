@@ -37,7 +37,6 @@ SYSTEM_PROMPT = (
 
 intents = discord.Intents.default()
 intents.message_content = True
-
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 db_pool: Optional[asyncpg.Pool] = None
@@ -48,13 +47,10 @@ async def init_db() -> None:
     global db_pool
     if db_pool is not None:
         return
-
     async with db_lock:
         if db_pool is not None:
             return
-
         db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
-
         async with db_pool.acquire() as conn:
             await conn.execute(
                 """
@@ -66,7 +62,6 @@ async def init_db() -> None:
                 );
                 """
             )
-
             await conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS messages (
@@ -79,7 +74,6 @@ async def init_db() -> None:
                 );
                 """
             )
-
             await conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS user_facts (
@@ -90,7 +84,6 @@ async def init_db() -> None:
                 );
                 """
             )
-
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_messages_channel_id_id ON messages(channel_id, id);"
             )
@@ -105,7 +98,6 @@ async def init_db() -> None:
 async def upsert_user_profile(user_id: str, display_name: str) -> None:
     await init_db()
     assert db_pool is not None
-
     now = datetime.now(timezone.utc)
     async with db_pool.acquire() as conn:
         await conn.execute(
@@ -116,34 +108,26 @@ async def upsert_user_profile(user_id: str, display_name: str) -> None:
             DO UPDATE SET display_name = EXCLUDED.display_name,
                           last_seen = EXCLUDED.last_seen;
             """,
-            user_id,
-            display_name,
-            now,
-            now,
+            user_id, display_name, now, now,
         )
 
 
 async def save_message(channel_id: str, user_id: str, role: str, content: str) -> None:
     await init_db()
     assert db_pool is not None
-
     async with db_pool.acquire() as conn:
         await conn.execute(
             """
             INSERT INTO messages (channel_id, user_id, role, content)
             VALUES ($1, $2, $3, $4);
             """,
-            channel_id,
-            user_id,
-            role,
-            content[:4000],
+            channel_id, user_id, role, content[:4000],
         )
 
 
 async def load_channel_history(channel_id: str, limit: int = 14) -> List[dict]:
     await init_db()
     assert db_pool is not None
-
     async with db_pool.acquire() as conn:
         rows = await conn.fetch(
             """
@@ -153,10 +137,8 @@ async def load_channel_history(channel_id: str, limit: int = 14) -> List[dict]:
             ORDER BY id DESC
             LIMIT $2;
             """,
-            channel_id,
-            limit,
+            channel_id, limit,
         )
-
     rows = list(reversed(rows))
     return [{"role": row["role"], "content": row["content"]} for row in rows]
 
@@ -164,7 +146,6 @@ async def load_channel_history(channel_id: str, limit: int = 14) -> List[dict]:
 async def load_user_facts(user_id: str, limit: int = 8) -> List[str]:
     await init_db()
     assert db_pool is not None
-
     async with db_pool.acquire() as conn:
         rows = await conn.fetch(
             """
@@ -174,10 +155,8 @@ async def load_user_facts(user_id: str, limit: int = 8) -> List[str]:
             ORDER BY id DESC
             LIMIT $2;
             """,
-            user_id,
-            limit,
+            user_id, limit,
         )
-
     rows = list(reversed(rows))
     return [row["fact"] for row in rows]
 
@@ -185,7 +164,6 @@ async def load_user_facts(user_id: str, limit: int = 8) -> List[str]:
 async def get_user_profile(user_id: str):
     await init_db()
     assert db_pool is not None
-
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow(
             """
@@ -201,22 +179,19 @@ async def get_user_profile(user_id: str):
 async def save_user_fact(user_id: str, fact: str) -> None:
     await init_db()
     assert db_pool is not None
-
     async with db_pool.acquire() as conn:
         await conn.execute(
             """
             INSERT INTO user_facts (user_id, fact)
             VALUES ($1, $2);
             """,
-            user_id,
-            fact[:1000],
+            user_id, fact[:1000],
         )
 
 
 async def delete_user_memory(user_id: str) -> None:
     await init_db()
     assert db_pool is not None
-
     async with db_pool.acquire() as conn:
         await conn.execute("DELETE FROM messages WHERE user_id = $1;", user_id)
         await conn.execute("DELETE FROM user_facts WHERE user_id = $1;", user_id)
@@ -226,15 +201,14 @@ async def delete_user_memory(user_id: str) -> None:
 async def delete_channel_memory(channel_id: str) -> None:
     await init_db()
     assert db_pool is not None
-
     async with db_pool.acquire() as conn:
         await conn.execute("DELETE FROM messages WHERE channel_id = $1;", channel_id)
 
 
-def split_message(text: str, limit: int = 1900):
+def split_message(text: str, limit: int = 1900) -> List[str]:
     text = text or ""
     if not text.strip():
-        return ["mrrp... empty reply 🥺"]
+        return ["mrrp~ me don’t know what to say... 🥺"]
     return [text[i:i + limit] for i in range(0, len(text), limit)]
 
 
@@ -247,10 +221,8 @@ async def build_context(channel_id: str, user_id: str, display_name: str) -> Lis
         {"role": "system", "content": SYSTEM_PROMPT},
         {
             "role": "system",
-            "content": (
-                f"Current user display name: {display_name}. "
-                f"Use the stored long-term memory below when relevant."
-            ),
+            "content": f"Current user display name: {display_name}. "
+                       f"Use the stored long-term memory below when relevant.",
         },
     ]
 
@@ -287,7 +259,7 @@ async def ask_ai(messages: List[dict]) -> str:
             messages=messages,
             temperature=0.9,
         )
-        return completion.choices[0].message.content or ""
+        return completion.choices[0].message.content or "mrrp... me brain went all floofy 🥺"
 
     return await asyncio.to_thread(call_groq)
 
@@ -301,8 +273,6 @@ async def on_ready():
 
 @bot.command()
 async def remember(ctx: commands.Context, *, fact: str):
-    if not ctx.guild and not isinstance(ctx.channel, discord.DMChannel):
-        return
     await save_user_fact(str(ctx.author.id), fact)
     await ctx.send("saved that about you 🐾")
 
@@ -313,7 +283,6 @@ async def facts(ctx: commands.Context):
     if not facts_list:
         await ctx.send("me don’t know any facts about you yet 🥺")
         return
-
     text = "\n".join(f"• {f}" for f in facts_list)
     await ctx.send(f"what me remember about you:\n{text}")
 
@@ -326,7 +295,8 @@ async def forgetme(ctx: commands.Context):
 
 @bot.command()
 async def reset(ctx: commands.Context):
-    channel_id = f"dm_{ctx.author.id}" if isinstance(ctx.channel, discord.DMChannel) else str(ctx.channel.id)
+    is_dm = ctx.guild is None
+    channel_id = f"dm_{ctx.author.id}" if is_dm else str(ctx.channel.id)
     await delete_channel_memory(channel_id)
     await ctx.send("channel memory reset 🫧")
 
@@ -340,7 +310,7 @@ async def on_message(message: discord.Message):
     if not content:
         return
 
-    # Keep commands working
+    # Handle commands first
     if content.startswith("!"):
         await bot.process_commands(message)
         return
@@ -372,7 +342,7 @@ async def on_message(message: discord.Message):
             print("Groq/DB error:", repr(e))
             await message.channel.send("oopsie, me hit an error 🥺")
 
-    await bot.process_commands(message)
+    # No extra process_commands at the end (already handled above)
 
 
 bot.run(DISCORD_TOKEN)
