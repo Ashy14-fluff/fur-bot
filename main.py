@@ -8,6 +8,7 @@ from typing import Optional, Set, Dict, List
 
 import asyncpg
 import discord
+from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
 from groq import Groq
@@ -18,9 +19,12 @@ DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 DATABASE_URL = os.getenv("DATABASE_URL")
 MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+GUILD_ID = os.getenv("GUILD_ID")
 
 if not DISCORD_TOKEN or not GROQ_API_KEY or not DATABASE_URL:
     raise RuntimeError("Missing env variables")
+
+SLASH_GUILD_ID = int(GUILD_ID) if GUILD_ID and GUILD_ID.isdigit() else None
 
 groq = Groq(api_key=GROQ_API_KEY)
 
@@ -41,13 +45,13 @@ channel_last_bot_talk: Dict[str, float] = {}
 channel_mood: Dict[str, str] = {}
 
 AUTO_TALK_CHECK_SECONDS = 60
-AUTO_TALK_IDLE_SECONDS = 600          # 10 min quiet before auto-talk
-AUTO_TALK_BOT_COOLDOWN = 900          # don't auto-talk too often
-AUTO_TALK_PROBABILITY = 0.18          # chance per check if a channel is eligible
+AUTO_TALK_IDLE_SECONDS = 600
+AUTO_TALK_BOT_COOLDOWN = 900
+AUTO_TALK_PROBABILITY = 0.18
 
-SPONTANEOUS_REPLY_PROB = 0.10         # reply sometimes in active chat even without mention
-SPONTANEOUS_IDLE_WINDOW = 900         # only when chat is still active within 15 min
-SPONTANEOUS_BOT_COOLDOWN = 240        # don't interrupt too often
+SPONTANEOUS_REPLY_PROB = 0.10
+SPONTANEOUS_IDLE_WINDOW = 900
+SPONTANEOUS_BOT_COOLDOWN = 240
 
 # ================= SYSTEM PROMPT =================
 SYSTEM_PROMPT = """
@@ -70,6 +74,11 @@ You are not a boring assistant.
 You are a living fluffy companion 🐾
 """
 
+# ================= APP COMMAND GROUPS =================
+admin_group = app_commands.Group(name="admin", description="Admin commands")
+memory_group = app_commands.Group(name="memory", description="Memory commands")
+bot.tree.add_command(admin_group)
+bot.tree.add_command(memory_group)
 
 # ================= DB =================
 async def init_db():
@@ -112,15 +121,12 @@ async def init_db():
 
         print("🟢 DB ready")
 
-
 # ================= HELPERS =================
 def touch_channel(channel_id: str):
     channel_last_activity[channel_id] = time.monotonic()
 
-
 def remember_bot_talk(channel_id: str):
     channel_last_bot_talk[channel_id] = time.monotonic()
-
 
 def mood_from_text(text: str) -> str:
     t = text.lower()
@@ -133,7 +139,6 @@ def mood_from_text(text: str) -> str:
     if any(w in t for w in ["wow", "omg", "haha", "lol", "hehe"]):
         return "playful"
     return "neutral"
-
 
 def fluff_wrap(reply: str, mood: str) -> str:
     if not reply:
@@ -162,7 +167,6 @@ def fluff_wrap(reply: str, mood: str) -> str:
 
     return f"{prefix} {reply}{suffix}"
 
-
 def strip_trigger_text(message: discord.Message) -> str:
     text = message.content
     if bot.user:
@@ -170,14 +174,12 @@ def strip_trigger_text(message: discord.Message) -> str:
         text = text.replace(f"<@!{bot.user.id}>", "")
     return text.strip()
 
-
 def is_bot_reply(message: discord.Message) -> bool:
     if not message.reference or not message.reference.resolved:
         return False
     resolved = message.reference.resolved
     author = getattr(resolved, "author", None)
     return bool(author and bot.user and author.id == bot.user.id)
-
 
 def current_live_mood(channel_id: str) -> str:
     mood = channel_mood.get(channel_id, "neutral")
@@ -193,6 +195,24 @@ def current_live_mood(channel_id: str) -> str:
         return "playful >:3"
     return "neutral 🐾"
 
+async def send_interaction(
+    interaction: discord.Interaction,
+    content: str,
+    *,
+    ephemeral: bool = False
+):
+    if interaction.response.is_done():
+        await interaction.followup.send(
+            content,
+            ephemeral=ephemeral,
+            allowed_mentions=discord.AllowedMentions.none()
+        )
+    else:
+        await interaction.response.send_message(
+            content,
+            ephemeral=ephemeral,
+            allowed_mentions=discord.AllowedMentions.none()
+        )
 
 # ================= MEMORY =================
 async def save_message(channel_id: str, user_id: str, role: str, content: str):
@@ -204,7 +224,6 @@ async def save_message(channel_id: str, user_id: str, role: str, content: str):
             )
     except Exception as e:
         print("DB SAVE ERROR:", repr(e))
-
 
 async def load_history(channel_id: str, limit: int = 20) -> List[dict]:
     try:
@@ -225,7 +244,6 @@ async def load_history(channel_id: str, limit: int = 20) -> List[dict]:
         print("DB LOAD ERROR:", repr(e))
         return []
 
-
 async def load_facts(user_id: str, limit: int = 10) -> List[str]:
     try:
         async with db.acquire() as conn:
@@ -244,7 +262,6 @@ async def load_facts(user_id: str, limit: int = 10) -> List[str]:
         print("FACT LOAD ERROR:", repr(e))
         return []
 
-
 async def save_fact(user_id: str, fact: str):
     try:
         async with db.acquire() as conn:
@@ -255,7 +272,6 @@ async def save_fact(user_id: str, fact: str):
     except Exception as e:
         print("FACT SAVE ERROR:", repr(e))
 
-
 async def save_fact_if_new(user_id: str, fact: str):
     if not fact:
         return
@@ -265,11 +281,7 @@ async def save_fact_if_new(user_id: str, fact: str):
         return
     await save_fact(user_id, fact)
 
-
 def extract_fact(text: str) -> Optional[str]:
-    t = text.strip()
-    low = t.lower()
-
     patterns = [
         (r"\bmy name is\s+(.+)$", "name"),
         (r"\bcall me\s+(.+)$", "name"),
@@ -281,19 +293,17 @@ def extract_fact(text: str) -> Optional[str]:
     ]
 
     for pat, label in patterns:
-        m = re.search(pat, low, re.IGNORECASE)
+        m = re.search(pat, text.strip(), re.IGNORECASE)
         if m:
-            value = t[m.start(1):].strip(" .!?")
+            value = m.group(1).strip(" .!?")
             if value:
                 return f"{label}: {value}"
 
     return None
 
-
 # ================= ADMIN =================
 async def is_admin(user_id: str):
     return user_id in admins or (bot_owner_id is not None and int(user_id) == bot_owner_id)
-
 
 async def load_admins():
     global admins
@@ -305,6 +315,11 @@ async def load_admins():
         print("ADMIN LOAD ERROR:", repr(e))
         admins = set()
 
+async def require_admin(interaction: discord.Interaction) -> bool:
+    if await is_admin(str(interaction.user.id)):
+        return True
+    await send_interaction(interaction, "mrrp~ no permission 🥺", ephemeral=True)
+    return False
 
 # ================= AI =================
 async def ask_ai(messages: List[dict]) -> str:
@@ -327,7 +342,6 @@ async def ask_ai(messages: List[dict]) -> str:
     except Exception as e:
         print("GROQ ERROR:", repr(e))
         return "mrrp~ something broke 🥺"
-
 
 # ================= CONTEXT =================
 async def build_context(channel_id: str, user_id: str, username: str, spontaneous: bool = False) -> List[dict]:
@@ -357,40 +371,116 @@ async def build_context(channel_id: str, user_id: str, username: str, spontaneou
     messages.extend(history)
     return messages
 
+# ================= SLASH COMMANDS =================
+@bot.tree.command(name="ask", description="Ask Fur Bot something directly")
+@app_commands.describe(prompt="What you want to ask")
+async def ask_cmd(interaction: discord.Interaction, prompt: str):
+    channel_id = str(interaction.channel_id or interaction.user.id)
+    user_id = str(interaction.user.id)
+    username = getattr(interaction.user, "display_name", None) or getattr(interaction.user, "global_name", None) or interaction.user.name
 
-# ================= MEMORY COMMANDS =================
-@bot.command()
-async def remember(ctx, *, fact: str):
-    await save_fact(str(ctx.author.id), fact)
-    await ctx.send("mrrp~ saved dat about yuw 🐾")
+    await interaction.response.defer(thinking=True)
 
+    try:
+        touch_channel(channel_id)
 
-@bot.command()
-async def facts(ctx):
-    facts_list = await load_facts(str(ctx.author.id), limit=10)
+        user_text = prompt.strip()
+        if not user_text:
+            await send_interaction(interaction, "mrrp~ say something first 🥺", ephemeral=True)
+            return
+
+        detected_mood = mood_from_text(user_text)
+        if detected_mood != "neutral":
+            channel_mood[channel_id] = detected_mood
+
+        await save_message(channel_id, user_id, "user", user_text)
+
+        if fact := extract_fact(user_text):
+            await save_fact_if_new(user_id, fact)
+
+        context = await build_context(channel_id, user_id, username, spontaneous=False)
+        reply = await ask_ai(context)
+        reply = fluff_wrap(reply, channel_mood.get(channel_id, "neutral"))
+
+        await save_message(channel_id, user_id, "assistant", reply)
+        remember_bot_talk(channel_id)
+
+        for i in range(0, len(reply), 1900):
+            chunk = reply[i:i+1900].strip()
+            if chunk:
+                await interaction.followup.send(chunk, allowed_mentions=discord.AllowedMentions.none())
+
+    except Exception:
+        print(traceback.format_exc())
+        await send_interaction(interaction, "mrrp~ something broke 🥺", ephemeral=True)
+
+@bot.tree.command(name="pet", description="Pet Fur Bot and make it happy")
+async def pet_cmd(interaction: discord.Interaction):
+    channel_id = str(interaction.channel_id or interaction.user.id)
+    channel_mood[channel_id] = "happy"
+    touch_channel(channel_id)
+    remember_bot_talk(channel_id)
+    await send_interaction(interaction, "mrrp~ purr purr >w< 🐾💕")
+
+@bot.tree.command(name="mood", description="Show the live mood in this channel")
+async def mood_cmd(interaction: discord.Interaction):
+    channel_id = str(interaction.channel_id or interaction.user.id)
+    await send_interaction(interaction, f"mrrp~ live mood here 🐾\n**{current_live_mood(channel_id)}**")
+
+@bot.tree.command(name="status", description="Show bot status")
+async def status_cmd(interaction: discord.Interaction):
+    if not await require_admin(interaction):
+        return
+
+    async with db.acquire() as conn:
+        msg_count = await conn.fetchval("SELECT COUNT(*) FROM messages")
+        admin_count = await conn.fetchval("SELECT COUNT(*) FROM admins")
+        fact_count = await conn.fetchval("SELECT COUNT(*) FROM user_facts")
+
+    channel_id = str(interaction.channel_id or interaction.user.id)
+    embed = discord.Embed(title="Fur Bot Status 🐾", color=discord.Color.magenta())
+    embed.add_field(name="Messages", value=str(msg_count), inline=True)
+    embed.add_field(name="Admins", value=str(admin_count), inline=True)
+    embed.add_field(name="Facts", value=str(fact_count), inline=True)
+    embed.add_field(name="Model", value=MODEL, inline=False)
+    embed.add_field(name="Mood", value=current_live_mood(channel_id), inline=False)
+    embed.add_field(name="Mode", value="full slash furry system", inline=False)
+    await send_interaction(interaction, "", ephemeral=False)
+    await interaction.followup.send(embed=embed)
+
+# ================= MEMORY GROUP =================
+@memory_group.command(name="remember", description="Store a fact about you")
+@app_commands.describe(fact="Something Fur Bot should remember")
+async def memory_remember(interaction: discord.Interaction, fact: str):
+    await save_fact(str(interaction.user.id), fact.strip())
+    await send_interaction(interaction, "mrrp~ saved dat about yuw 🐾", ephemeral=True)
+
+@memory_group.command(name="facts", description="Show what Fur Bot remembers about you")
+async def memory_facts(interaction: discord.Interaction):
+    facts_list = await load_facts(str(interaction.user.id), limit=10)
     if not facts_list:
-        return await ctx.send("mrrp~ me don’t know any facts about yuw yet 🥺")
+        await send_interaction(interaction, "mrrp~ me don’t know any facts about yuw yet 🥺", ephemeral=True)
+        return
     text = "\n".join(f"• {f}" for f in facts_list)
-    await ctx.send(f"mrrp~ what me remember about yuw:\n{text}")
+    await send_interaction(interaction, f"mrrp~ what me remember about yuw:\n{text}", ephemeral=True)
 
-
-@bot.command()
-async def forgetme(ctx):
+@memory_group.command(name="forgetme", description="Delete your stored memory")
+async def memory_forgetme(interaction: discord.Interaction):
     try:
         async with db.acquire() as conn:
-            await conn.execute("DELETE FROM messages WHERE user_id=$1", str(ctx.author.id))
-            await conn.execute("DELETE FROM user_facts WHERE user_id=$1", str(ctx.author.id))
-        await ctx.send("mrrp~ forgot your stored memory here 🫧")
+            await conn.execute("DELETE FROM messages WHERE user_id=$1", str(interaction.user.id))
+            await conn.execute("DELETE FROM user_facts WHERE user_id=$1", str(interaction.user.id))
+        await send_interaction(interaction, "mrrp~ forgot your stored memory here 🫧", ephemeral=True)
     except Exception as e:
         print("FORGET ERROR:", repr(e))
-        await ctx.send("mrrp~ could not forget dat right now 🥺")
+        await send_interaction(interaction, "mrrp~ could not forget dat right now 🥺", ephemeral=True)
 
-
-# ================= ADMIN COMMANDS =================
-@bot.command()
-async def addadmin(ctx, member: discord.Member):
-    if not await is_admin(str(ctx.author.id)):
-        return await ctx.send("mrrp~ no permission 🥺")
+# ================= ADMIN GROUP =================
+@admin_group.command(name="add", description="Add a user as admin")
+@app_commands.describe(member="The member to add")
+async def admin_add(interaction: discord.Interaction, member: discord.Member):
+    if not await require_admin(interaction):
+        return
 
     async with db.acquire() as conn:
         await conn.execute(
@@ -399,84 +489,56 @@ async def addadmin(ctx, member: discord.Member):
         )
 
     admins.add(str(member.id))
-    await ctx.send(f"mrrp~ {member.display_name} is now admin 🐾")
+    await send_interaction(interaction, f"mrrp~ {member.display_name} is now admin 🐾", ephemeral=True)
 
-
-@bot.command()
-async def deladmin(ctx, member: discord.Member):
-    if not await is_admin(str(ctx.author.id)):
-        return await ctx.send("mrrp~ no permission 🥺")
+@admin_group.command(name="remove", description="Remove a user from admin")
+@app_commands.describe(member="The member to remove")
+async def admin_remove(interaction: discord.Interaction, member: discord.Member):
+    if not await require_admin(interaction):
+        return
 
     async with db.acquire() as conn:
         await conn.execute("DELETE FROM admins WHERE user_id=$1", str(member.id))
 
     admins.discard(str(member.id))
-    await ctx.send(f"mrrp~ removed admin {member.display_name} 🐾")
+    await send_interaction(interaction, f"mrrp~ removed admin {member.display_name} 🐾", ephemeral=True)
 
-
-@bot.command()
-async def listadmins(ctx):
-    if not await is_admin(str(ctx.author.id)):
-        return await ctx.send("mrrp~ no permission 🥺")
+@admin_group.command(name="list", description="List admins")
+async def admin_list(interaction: discord.Interaction):
+    if not await require_admin(interaction):
+        return
     if not admins:
-        return await ctx.send("mrrp~ no admins yet 🐾")
-    await ctx.send("mrrp~ admins:\n" + "\n".join(f"<@{a}>" for a in sorted(admins)))
+        await send_interaction(interaction, "mrrp~ no admins yet 🐾", ephemeral=True)
+        return
+    await send_interaction(interaction, "mrrp~ admins:\n" + "\n".join(f"<@{a}>" for a in sorted(admins)), ephemeral=True)
 
-
-@bot.command()
-async def kick(ctx, member: discord.Member, *, reason: str = "no reason"):
-    if not await is_admin(str(ctx.author.id)):
-        return await ctx.send("mrrp~ no permission 🥺")
+@admin_group.command(name="kick", description="Kick a member")
+@app_commands.describe(member="Member to kick", reason="Reason for kick")
+async def admin_kick(interaction: discord.Interaction, member: discord.Member, reason: str = "no reason"):
+    if not await require_admin(interaction):
+        return
     await member.kick(reason=reason)
-    await ctx.send(f"mrrp~ kicked {member.display_name} 🐾")
+    await send_interaction(interaction, f"mrrp~ kicked {member.display_name} 🐾", ephemeral=True)
 
-
-@bot.command()
-async def ban(ctx, member: discord.Member, *, reason: str = "no reason"):
-    if not await is_admin(str(ctx.author.id)):
-        return await ctx.send("mrrp~ no permission 🥺")
+@admin_group.command(name="ban", description="Ban a member")
+@app_commands.describe(member="Member to ban", reason="Reason for ban")
+async def admin_ban(interaction: discord.Interaction, member: discord.Member, reason: str = "no reason"):
+    if not await require_admin(interaction):
+        return
     await member.ban(reason=reason)
-    await ctx.send(f"mrrp~ banned {member.display_name} 💢")
+    await send_interaction(interaction, f"mrrp~ banned {member.display_name} 💢", ephemeral=True)
 
-
-@bot.command()
-async def clearhistory(ctx):
-    if not await is_admin(str(ctx.author.id)):
-        return await ctx.send("mrrp~ no permission 🥺")
+@admin_group.command(name="clearhistory", description="Clear this channel's history")
+async def admin_clearhistory(interaction: discord.Interaction):
+    if not await require_admin(interaction):
+        return
     try:
         async with db.acquire() as conn:
-            await conn.execute("DELETE FROM messages WHERE channel_id=$1", str(ctx.channel.id))
-        await ctx.send("mrrp~ history cleared 🧹✨")
+            await conn.execute("DELETE FROM messages WHERE channel_id=$1", str(interaction.channel_id))
+        await send_interaction(interaction, "mrrp~ history cleared 🧹✨", ephemeral=True)
     except Exception as e:
         print("CLEAR HISTORY ERROR:", repr(e))
-        await ctx.send("mrrp~ could not clear history 🥺")
-
-
-@bot.command()
-async def mood(ctx):
-    channel_id = str(ctx.channel.id)
-    await ctx.send(f"mrrp~ live mood here 🐾\n**{current_live_mood(channel_id)}**")
-
-
-@bot.command()
-async def status(ctx):
-    if not await is_admin(str(ctx.author.id)):
-        return await ctx.send("mrrp~ no permission 🥺")
-
-    async with db.acquire() as conn:
-        msg_count = await conn.fetchval("SELECT COUNT(*) FROM messages")
-        admin_count = await conn.fetchval("SELECT COUNT(*) FROM admins")
-        fact_count = await conn.fetchval("SELECT COUNT(*) FROM user_facts")
-
-    channel_id = str(ctx.channel.id)
-    embed = discord.Embed(title="Fur Bot Status 🐾", color=discord.Color.magenta())
-    embed.add_field(name="Messages", value=str(msg_count), inline=True)
-    embed.add_field(name="Admins", value=str(admin_count), inline=True)
-    embed.add_field(name="Facts", value=str(fact_count), inline=True)
-    embed.add_field(name="Model", value=MODEL, inline=False)
-    embed.add_field(name="Mood", value=current_live_mood(channel_id), inline=False)
-    await ctx.send(embed=embed)
-
+        await send_interaction(interaction, "mrrp~ could not clear history 🥺", ephemeral=True)
 
 # ================= AUTO TALK =================
 async def auto_talk_loop():
@@ -539,15 +601,14 @@ async def auto_talk_loop():
         except Exception as e:
             print("AUTO TALK ERROR:", repr(e))
 
-
 # ================= CHAT =================
 @bot.event
 async def on_message(message: discord.Message):
     if message.author.bot:
         return
 
+    # ignore regular prefix text; this is slash-first now
     if message.content.startswith("!"):
-        await bot.process_commands(message)
         return
 
     channel_id = str(message.channel.id)
@@ -609,7 +670,6 @@ async def on_message(message: discord.Message):
         print(traceback.format_exc())
         await message.channel.send("mrrp~ something broke 🥺")
 
-
 # ================= READY =================
 @bot.event
 async def on_ready():
@@ -620,11 +680,24 @@ async def on_ready():
     app_info = await bot.application_info()
     bot_owner_id = app_info.owner.id if app_info.owner else None
 
+    if not getattr(bot, "_slash_synced", False):
+        try:
+            if SLASH_GUILD_ID:
+                guild_obj = discord.Object(id=SLASH_GUILD_ID)
+                bot.tree.copy_global_to(guild=guild_obj)
+                synced = await bot.tree.sync(guild=guild_obj)
+                print(f"🟣 Synced {len(synced)} slash commands to guild {SLASH_GUILD_ID}")
+            else:
+                synced = await bot.tree.sync()
+                print(f"🟣 Synced {len(synced)} global slash commands")
+            bot._slash_synced = True
+        except Exception as e:
+            print("SLASH SYNC ERROR:", repr(e))
+
     if not getattr(bot, "_auto_talk_started", False):
         bot.loop.create_task(auto_talk_loop())
         bot._auto_talk_started = True
 
     print(f"🐾 Bot ready as {bot.user} | admin floofs: {len(admins)}")
-
 
 bot.run(DISCORD_TOKEN)
