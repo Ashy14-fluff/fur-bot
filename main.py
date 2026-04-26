@@ -375,6 +375,18 @@ async def init_db() -> None:
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_user_facts_user_id_id ON user_facts(user_id, id);")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_channel_characters_channel_id ON channel_characters(channel_id);")
 
+            # Migration: add scope_id column to messages if it was created by an older schema
+            col_exists = await conn.fetchval(
+                """
+                SELECT COUNT(*) FROM information_schema.columns
+                WHERE table_name = 'messages' AND column_name = 'scope_id';
+                """
+            )
+            if not col_exists:
+                await conn.execute("ALTER TABLE messages ADD COLUMN scope_id TEXT NOT NULL DEFAULT '';")
+                await conn.execute("UPDATE messages SET scope_id = 'ch_' || channel_id WHERE scope_id = '';")
+                await conn.execute("ALTER TABLE messages ALTER COLUMN scope_id DROP DEFAULT;")
+
 
 async def get_setting(key: str, default: str) -> str:
     await init_db()
