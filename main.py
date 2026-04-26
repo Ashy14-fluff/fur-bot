@@ -2,6 +2,7 @@ import os
 import time
 import asyncio
 import random
+import traceback
 from datetime import datetime, timezone
 from typing import Optional, List
 
@@ -17,6 +18,12 @@ DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 DATABASE_URL = os.getenv("DATABASE_URL")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+
+print(f"🔧 Config check:")
+print(f"   DISCORD_TOKEN: {'✅' if DISCORD_TOKEN else '❌'}")
+print(f"   GROQ_API_KEY: {'✅' if GROQ_API_KEY else '❌'}")
+print(f"   DATABASE_URL: {'✅' if DATABASE_URL else '❌'}")
+print(f"   GROQ_MODEL: {GROQ_MODEL}")
 
 if not DISCORD_TOKEN:
     raise RuntimeError("DISCORD_TOKEN is missing.")
@@ -53,53 +60,58 @@ async def init_db() -> None:
     if db_pool is not None:
         return
 
+    print("🗄️ Initializing database...")
     async with db_lock:
         if db_pool is not None:
             return
 
-        db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
+        try:
+            db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
+            print("✅ Database pool created")
 
-        async with db_pool.acquire() as conn:
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS bot_settings (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL
-                );
-            """)
+            async with db_pool.acquire() as conn:
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS bot_settings (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL
+                    );
+                """)
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS user_profiles (
+                        user_id TEXT PRIMARY KEY,
+                        display_name TEXT NOT NULL,
+                        first_seen TIMESTAMPTZ NOT NULL,
+                        last_seen TIMESTAMPTZ NOT NULL
+                    );
+                """)
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS user_facts (
+                        id BIGSERIAL PRIMARY KEY,
+                        user_id TEXT NOT NULL,
+                        fact TEXT NOT NULL,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    );
+                """)
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS messages (
+                        id BIGSERIAL PRIMARY KEY,
+                        scope_id TEXT NOT NULL,
+                        channel_id TEXT NOT NULL,
+                        user_id TEXT NOT NULL,
+                        role TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    );
+                """)
 
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS user_profiles (
-                    user_id TEXT PRIMARY KEY,
-                    display_name TEXT NOT NULL,
-                    first_seen TIMESTAMPTZ NOT NULL,
-                    last_seen TIMESTAMPTZ NOT NULL
-                );
-            """)
-
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS user_facts (
-                    id BIGSERIAL PRIMARY KEY,
-                    user_id TEXT NOT NULL,
-                    fact TEXT NOT NULL,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                );
-            """)
-
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS messages (
-                    id BIGSERIAL PRIMARY KEY,
-                    scope_id TEXT NOT NULL,
-                    channel_id TEXT NOT NULL,
-                    user_id TEXT NOT NULL,
-                    role TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                );
-            """)
-
-            await conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_scope_id_id ON messages(scope_id, id);")
-            await conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_user_id_id ON messages(user_id, id);")
-            await conn.execute("CREATE INDEX IF NOT EXISTS idx_user_facts_user_id_id ON user_facts(user_id, id);")
+                await conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_scope_id_id ON messages(scope_id, id);")
+                await conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_user_id_id ON messages(user_id, id);")
+                await conn.execute("CREATE INDEX IF NOT EXISTS idx_user_facts_user_id_id ON user_facts(user_id, id);")
+            
+            print("✅ Database tables ready")
+        except Exception as e:
+            print(f"❌ Database init failed: {repr(e)}")
+            raise
 
 
 async def get_setting(key: str, default: str) -> str:
@@ -276,9 +288,12 @@ async def build_context(
     current_mood: str,
     global_mood: str,
 ) -> List[dict]:
+    print("📚 Loading context...")
     profile = await get_user_profile(user_id)
     facts = await load_user_facts(user_id, limit=8)
     history = await load_scope_history(scope_id, limit=14)
+
+    print(f"   Profile: {bool(profile)}, Facts: {len(facts)}, History: {len(history)}")
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -322,22 +337,37 @@ async def build_context(
 
 async def ask_ai(messages: List[dict]) -> str:
     def call_groq():
-        completion = groq_client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=messages,
-            temperature=0.9,
-        )
-        return completion.choices[0].message.content or ""
+        try:
+            print(f"🌐 Groq API call: model={GROQ_MODEL}, messages={len(messages)}")
+            completion = groq_client.chat.completions.create(
+                model=GROQ_MODEL,
+                messages=messages,
+                temperature=0.9,
+                max_tokens=2000,
+            )
+            content = completion.choices[0].message.content or ""
+            print(f"✅ Groq success: {len(content)} chars")
+            return content
+        except Exception as groq_err:
+            print(f"❌ Groq ERROR: {repr(groq_err)}")
+            print(f"   Model: {GROQ_MODEL}")
+            print(f"   Messages count: {len(messages)}")
+            raise groq_err
 
     return await asyncio.to_thread(call_groq)
 
 
 @bot.event
 async def on_ready():
-    await init_db()
-    await ensure_defaults()
-    print(f"Logged in as {bot.user}")
-    await bot.change_presence(activity=discord.Game(name="fluffy chats 🐾"))
+    print("🚀 Bot ready!")
+    try:
+        await init_db()
+        await ensure_defaults()
+        print(f"✅ Logged in as {bot.user}")
+        await bot.change_presence(activity=discord.Game(name="fluffy chats 🐾"))
+    except Exception as e:
+        print(f"❌ on_ready failed: {repr(e)}")
+        traceback.print_exc()
 
 
 @bot.command()
@@ -357,7 +387,6 @@ async def facts(ctx: commands.Context):
     if not facts_list:
         await ctx.send("me don't know any facts about you yet 🥺")
         return
-
     text = "\n".join(f"• {f}" for f in facts_list)
     await ctx.send(f"what me remember about you:\n{text}")
 
@@ -385,36 +414,53 @@ async def on_message(message: discord.Message):
     if not content:
         return
 
-    print(f"MESSAGE RECEIVED | {message.author} | {content}")
+    print(f"\n📨 MESSAGE | {message.author} ({message.author.id}) | {content}")
 
     if content.startswith("!"):
         await bot.process_commands(message)
         return
 
     try:
+        # 1. Basic setup
         scope_key = get_scope_key(message)
         user_id = str(message.author.id)
-        bot_user_id = str(bot.user.id)  # ✅ FIXED: Bot's own user ID
+        bot_user_id = str(bot.user.id)
         display_name = get_display_name(message.author)
-        channel_id = str(message.channel.id)  # ✅ FIXED: Proper channel ID
+        channel_id = str(message.channel.id)
         channel_key = scope_key
 
-        global_mood = await get_setting("global_mood", "neutral")
+        print(f"🔧 Setup: scope={scope_key}, user={user_id}, channel={channel_id}")
 
+        # 2. Check DB first
+        try:
+            await init_db()
+            print("✅ DB OK")
+        except Exception as db_err:
+            print(f"❌ DB FAILED: {repr(db_err)}")
+            await message.channel.send("mrrp… database connection failed 🥺")
+            return
+
+        # 3. Global mood
+        global_mood = await get_setting("global_mood", "neutral")
+        print(f"🌍 Global mood: {global_mood}")
+
+        # 4. Mood detection
         detected_mood = mood_from_text(content)
         if detected_mood != "neutral":
             channel_mood[channel_key] = detected_mood
         else:
             channel_mood.pop(channel_key, None)
-
         current_mood = channel_mood.get(channel_key, global_mood)
+        print(f"😺 Mood: {current_mood}")
 
+        # 5. Save user data
         await upsert_user_profile(user_id, display_name)
-        
-        # ✅ FIXED: Proper channel_id parameter
         await save_message(scope_key, channel_id, user_id, "user", content)
+        print("✅ User message saved")
 
+        # 6. AI processing
         async with message.channel.typing():
+            print("🤖 Building context...")
             context = await build_context(
                 scope_id=scope_key,
                 channel_key=channel_key,
@@ -424,31 +470,40 @@ async def on_message(message: discord.Message):
                 global_mood=global_mood,
             )
 
+            print("🧠 Calling AI...")
             reply = await ask_ai(context)
-            print("AI RAW:", reply)
+            print(f"✅ AI reply: {reply[:100]}...")
 
-            if not reply:
-                await message.channel.send("mrrp… me got no reply from AI 🥺")
+            if not reply.strip():
+                await message.channel.send("mrrp… AI gave empty reply 🥺")
                 return
 
+            # 7. Send reply
             reply = apply_mood_to_reply(reply, current_mood)
-
-            # ✅ FIXED: Proper channel_id and bot_user_id
             await save_message(scope_key, channel_id, bot_user_id, "bot", reply)
-
-            for chunk in split_message(reply):
+            
+            print(f"📤 Sending: {reply[:100]}...")
+            for i, chunk in enumerate(split_message(reply), 1):
+                print(f"   Chunk {i}: {chunk[:50]}...")
                 await message.channel.send(chunk)
+            print("✅ All chunks sent!")
 
     except Exception as e:
-        print("ON_MESSAGE ERROR:", repr(e))
-        await message.channel.send("oopsie… internal error 🥺")
+        print(f"\n💥 CRITICAL ERROR in on_message:")
+        print(f"  Type: {type(e).__name__}")
+        print(f"  Message: {repr(e)}")
+        traceback.print_exc()
+        await message.channel.send("oopsie… internal error 🥺 (check console!)")
 
     await bot.process_commands(message)
 
 
 while True:
     try:
+        print("🔄 Starting bot...")
         bot.run(DISCORD_TOKEN)
     except Exception as e:
-        print("Bot crashed, restarting...", repr(e))
+        print(f"💥 Bot crashed: {repr(e)}")
+        traceback.print_exc()
+        print("⏳ Restarting in 5s...")
         time.sleep(5)
