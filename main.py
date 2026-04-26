@@ -126,7 +126,7 @@ DASHBOARD_HTML = """
 <html>
 <head>
   <meta charset="utf-8">
-  <title>Fur Bot v3.2 Dashboard</title>
+  <title>Fur Bot Dashboard</title>
   <style>
     body { margin: 0; font-family: Arial, sans-serif; background: linear-gradient(180deg, #111318, #0b0d12); color: #f3f4f6; }
     .wrap { width: min(96vw, 1100px); margin: 0 auto; padding: 32px 14px 48px; }
@@ -136,28 +136,24 @@ DASHBOARD_HTML = """
     .sub { margin: 0 0 18px; color: #c7ccd6; line-height: 1.5; }
     label { display: block; margin: 14px 0 8px; font-weight: 700; }
     textarea, select, input[type="text"] { width: 100%; box-sizing: border-box; border-radius: 12px; border: 1px solid #343b4a; padding: 12px 14px; font-size: 15px; background: #0f1115; color: #f3f4f6; }
-    textarea { min-height: 260px; resize: vertical; line-height: 1.5; }
+    textarea { min-height: 240px; resize: vertical; line-height: 1.5; }
     .grid { display: grid; grid-template-columns: 320px 1fr; gap: 16px; }
     .stack { display: grid; gap: 14px; }
     .row { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 18px; }
     button, a.btn { border-radius: 12px; padding: 12px 16px; font-size: 15px; border: none; cursor: pointer; font-weight: 700; text-decoration: none; display: inline-block; }
     button.save { background: #7c3aed; color: white; }
     button.secondary, a.btn { background: #1f2937; color: white; }
-    button.danger { background: #7f1d1d; color: white; }
-    .pill { display: inline-block; padding: 4px 10px; background: #1f2937; border-radius: 999px; margin-right: 8px; }
     .list a { display:block; padding: 10px 12px; margin-bottom: 8px; border-radius: 12px; background: #0f1115; color: #f3f4f6; text-decoration: none; border: 1px solid #2b3240; }
     .list a.active { border-color: #7c3aed; background: #1b1630; }
     .tiny { margin-top: 10px; color: #9ca3af; font-size: 12px; line-height: 1.5; }
     .topbar { display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom: 16px; }
-    .notice { margin-top: 10px; color: #c7ccd6; }
-    .section { margin-top: 16px; }
   </style>
 </head>
 <body>
   <div class="wrap">
     <div class="topbar">
       <div>
-        <h1>Fur Bot v3.2 Dashboard</h1>
+        <h1>Fur Bot Dashboard</h1>
         <p class="sub">Change characters and moods without opening Python again.</p>
       </div>
       <div>
@@ -176,7 +172,6 @@ DASHBOARD_HTML = """
             </a>
           {% endfor %}
         </div>
-
         <div class="tiny">
           Use <strong>!character &lt;id&gt;</strong> in Discord to switch the current channel.
         </div>
@@ -187,6 +182,7 @@ DASHBOARD_HTML = """
           <h2>Global settings</h2>
           <form method="post">
             <input type="hidden" name="action" value="save_global">
+
             <label>Global mood</label>
             <select name="global_mood">
               {% for option in mood_options %}
@@ -252,10 +248,6 @@ DASHBOARD_HTML = """
               <button class="secondary" type="submit">Add character</button>
             </div>
           </form>
-
-          <div class="notice">
-            You can make as many characters as you like. Each channel can switch between them.
-          </div>
         </div>
       </div>
     </div>
@@ -378,18 +370,10 @@ async def init_db() -> None:
                 """
             )
 
-            await conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_messages_scope_id_id ON messages(scope_id, id);"
-            )
-            await conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_messages_user_id_id ON messages(user_id, id);"
-            )
-            await conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_user_facts_user_id_id ON user_facts(user_id, id);"
-            )
-            await conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_channel_characters_channel_id ON channel_characters(channel_id);"
-            )
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_scope_id_id ON messages(scope_id, id);")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_user_id_id ON messages(user_id, id);")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_user_facts_user_id_id ON user_facts(user_id, id);")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_channel_characters_channel_id ON channel_characters(channel_id);")
 
 
 async def get_setting(key: str, default: str) -> str:
@@ -419,14 +403,6 @@ async def set_setting(key: str, value: str) -> None:
         )
 
 
-async def ensure_defaults() -> None:
-    await set_setting("global_mood", await get_setting("global_mood", "neutral"))
-    await set_setting("default_character_id", await get_setting("default_character_id", "fur"))
-
-    for cid, name, emoji, prompt in DEFAULT_CHARACTERS:
-        await upsert_character(cid, name, emoji, prompt)
-
-
 async def upsert_character(character_id: str, name: str, emoji: str, prompt: str) -> None:
     await init_db()
     assert db_pool is not None
@@ -441,16 +417,21 @@ async def upsert_character(character_id: str, name: str, emoji: str, prompt: str
             """
             INSERT INTO characters (id, name, emoji, prompt)
             VALUES ($1, $2, $3, $4)
-            ON CONFLICT (id)
-            DO UPDATE SET name = EXCLUDED.name,
-                          emoji = EXCLUDED.emoji,
-                          prompt = EXCLUDED.prompt;
+            ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, emoji = EXCLUDED.emoji, prompt = EXCLUDED.prompt;
             """,
             character_id,
             name,
             emoji,
             prompt,
         )
+
+
+async def ensure_defaults() -> None:
+    await set_setting("global_mood", await get_setting("global_mood", "neutral"))
+    await set_setting("default_character_id", await get_setting("default_character_id", "fur"))
+
+    for cid, name, emoji, prompt in DEFAULT_CHARACTERS:
+        await upsert_character(cid, name, emoji, prompt)
 
 
 async def list_characters() -> List[dict]:
@@ -520,8 +501,7 @@ async def set_channel_character(channel_id: str, character_id: str) -> None:
             """
             INSERT INTO channel_characters (channel_id, character_id)
             VALUES ($1, $2)
-            ON CONFLICT (channel_id)
-            DO UPDATE SET character_id = EXCLUDED.character_id;
+            ON CONFLICT (channel_id) DO UPDATE SET character_id = EXCLUDED.character_id;
             """,
             channel_id,
             character_id,
@@ -548,45 +528,6 @@ async def get_channel_character(channel_id: str) -> dict:
 
     default_id = await get_default_character_id()
     return await get_character(default_id)
-
-
-async def delete_user_memory(user_id: str) -> None:
-    await init_db()
-    assert db_pool is not None
-
-    async with db_pool.acquire() as conn:
-        await conn.execute("DELETE FROM messages WHERE user_id = $1;", user_id)
-        await conn.execute("DELETE FROM user_facts WHERE user_id = $1;", user_id)
-        await conn.execute("DELETE FROM user_profiles WHERE user_id = $1;", user_id)
-
-
-async def delete_channel_memory(channel_id: str) -> None:
-    await init_db()
-    assert db_pool is not None
-
-    async with db_pool.acquire() as conn:
-        await conn.execute("DELETE FROM messages WHERE channel_id = $1;", channel_id)
-
-
-async def upsert_user_profile(user_id: str, display_name: str) -> None:
-    await init_db()
-    assert db_pool is not None
-
-    now = datetime.now(timezone.utc)
-    async with db_pool.acquire() as conn:
-        await conn.execute(
-            """
-            INSERT INTO user_profiles (user_id, display_name, first_seen, last_seen)
-            VALUES ($1, $2, $3, $4)
-            ON CONFLICT (user_id)
-            DO UPDATE SET display_name = EXCLUDED.display_name,
-                          last_seen = EXCLUDED.last_seen;
-            """,
-            user_id,
-            display_name,
-            now,
-            now,
-        )
 
 
 async def save_user_fact(user_id: str, fact: str) -> None:
@@ -639,6 +580,45 @@ async def get_user_profile(user_id: str):
             user_id,
         )
     return row
+
+
+async def upsert_user_profile(user_id: str, display_name: str) -> None:
+    await init_db()
+    assert db_pool is not None
+
+    now = datetime.now(timezone.utc)
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO user_profiles (user_id, display_name, first_seen, last_seen)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (user_id)
+            DO UPDATE SET display_name = EXCLUDED.display_name,
+                          last_seen = EXCLUDED.last_seen;
+            """,
+            user_id,
+            display_name,
+            now,
+            now,
+        )
+
+
+async def delete_user_memory(user_id: str) -> None:
+    await init_db()
+    assert db_pool is not None
+
+    async with db_pool.acquire() as conn:
+        await conn.execute("DELETE FROM messages WHERE user_id = $1;", user_id)
+        await conn.execute("DELETE FROM user_facts WHERE user_id = $1;", user_id)
+        await conn.execute("DELETE FROM user_profiles WHERE user_id = $1;", user_id)
+
+
+async def delete_channel_memory(channel_id: str) -> None:
+    await init_db()
+    assert db_pool is not None
+
+    async with db_pool.acquire() as conn:
+        await conn.execute("DELETE FROM messages WHERE channel_id = $1;", channel_id)
 
 
 async def load_scope_history(scope_id: str, limit: int = 14) -> List[dict]:
@@ -871,13 +851,6 @@ def dashboard():
 
             return redirect(url_for("dashboard"))
 
-        if action == "switch_channel_character":
-            channel_key = request.form.get("channel_key", "").strip()
-            selected_char_id = normalize_id(request.form.get("selected_char_id", "fur")) or "fur"
-            if channel_key:
-                run_sync(set_channel_character(channel_key, selected_char_id))
-            return redirect(url_for("dashboard", char=selected_char_id))
-
     characters = run_sync(list_characters())
     global_mood = run_sync(get_global_mood())
     default_character_id = run_sync(get_default_character_id())
@@ -911,6 +884,11 @@ async def on_ready():
 
 
 @bot.command()
+async def ping(ctx: commands.Context):
+    await ctx.send("pong 🐾")
+
+
+@bot.command()
 async def characters(ctx: commands.Context):
     chars = await list_characters()
     if not chars:
@@ -925,14 +903,15 @@ async def characters(ctx: commands.Context):
     await ctx.send("available characters:\n" + "\n".join(lines))
 
 
-@bot.command()
-async def current(ctx: commands.Context):
+@bot.command(name="current")
+async def current_cmd(ctx: commands.Context):
     channel_key = get_channel_key(ctx.message)
     char = await get_channel_character(channel_key)
     await ctx.send(f"this channel is using {char['emoji']} **{char['name']}** (`{char['id']}`)")
 
-@bot.command()
-async def character(ctx: commands.Context, char_id: str):
+
+@bot.command(name="character")
+async def character_cmd(ctx: commands.Context, char_id: str):
     channel_key = get_channel_key(ctx.message)
     char_id = normalize_id(char_id)
     char = await fetch_character(char_id)
@@ -946,10 +925,12 @@ async def character(ctx: commands.Context, char_id: str):
     await set_channel_character(channel_key, char_id)
     await ctx.send(f"switched this channel to {char['emoji']} **{char['name']}** (`{char['id']}`)")
 
+
 @bot.command()
 async def remember(ctx: commands.Context, *, fact: str):
     await save_user_fact(str(ctx.author.id), fact)
     await ctx.send("saved that about you 🐾")
+
 
 @bot.command()
 async def facts(ctx: commands.Context):
@@ -961,10 +942,12 @@ async def facts(ctx: commands.Context):
     text = "\n".join(f"• {f}" for f in facts_list)
     await ctx.send(f"what me remember about you:\n{text}")
 
+
 @bot.command()
 async def forgetme(ctx: commands.Context):
     await delete_user_memory(str(ctx.author.id))
     await ctx.send("forgot your stored memory here 🫧")
+
 
 @bot.command()
 async def reset(ctx: commands.Context):
@@ -982,6 +965,8 @@ async def on_message(message: discord.Message):
     content = message.content.strip()
     if not content:
         return
+
+    print(f"MESSAGE RECEIVED | {message.author} | {content}")
 
     if content.startswith("!"):
         await bot.process_commands(message)
@@ -1017,6 +1002,7 @@ async def on_message(message: discord.Message):
                 current_mood=current_mood,
                 global_mood=global_mood,
             )
+
             reply = await ask_ai(context)
             reply = apply_mood_to_reply(reply, current_mood)
 
@@ -1029,7 +1015,11 @@ async def on_message(message: discord.Message):
                 )
 
             if message.guild is not None and random.random() < 0.20:
-                await message.add_reaction(character["emoji"] if len(character["emoji"]) <= 2 else "🐾")
+                try:
+                    emoji = character["emoji"] if character["emoji"] else "🐾"
+                    await message.add_reaction(emoji if len(emoji) <= 2 else "🐾")
+                except Exception:
+                    pass
 
         except Exception as e:
             print("Groq/DB error:", repr(e))
