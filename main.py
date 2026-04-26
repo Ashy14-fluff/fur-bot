@@ -4,6 +4,8 @@ import time
 import asyncio
 import random
 import traceback
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from typing import Optional, Set, Dict, List
 
 import asyncpg
@@ -20,9 +22,15 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 DATABASE_URL = os.getenv("DATABASE_URL")
 MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 GUILD_ID = os.getenv("GUILD_ID")
+BOT_TIMEZONE = os.getenv("BOT_TIMEZONE", "Asia/Jakarta")
 
 if not DISCORD_TOKEN or not GROQ_API_KEY or not DATABASE_URL:
     raise RuntimeError("Missing env variables")
+
+try:
+    BOT_TZ = ZoneInfo(BOT_TIMEZONE)
+except Exception:
+    BOT_TZ = ZoneInfo("UTC")
 
 SLASH_GUILD_ID = int(GUILD_ID) if GUILD_ID and GUILD_ID.isdigit() else None
 
@@ -181,6 +189,19 @@ def is_bot_reply(message: discord.Message) -> bool:
     author = getattr(resolved, "author", None)
     return bool(author and bot.user and author.id == bot.user.id)
 
+def bot_local_dt() -> datetime:
+    return datetime.now(BOT_TZ)
+
+def time_of_day_label(dt: datetime) -> str:
+    h = dt.hour
+    if 5 <= h < 11:
+        return "morning"
+    if 11 <= h < 16:
+        return "afternoon"
+    if 16 <= h < 21:
+        return "evening"
+    return "night"
+
 def current_live_mood(channel_id: str) -> str:
     mood = channel_mood.get(channel_id, "neutral")
     idle = time.monotonic() - channel_last_activity.get(channel_id, time.monotonic())
@@ -195,12 +216,7 @@ def current_live_mood(channel_id: str) -> str:
         return "playful >:3"
     return "neutral 🐾"
 
-async def send_interaction(
-    interaction: discord.Interaction,
-    content: str,
-    *,
-    ephemeral: bool = False
-):
+async def send_interaction(interaction: discord.Interaction, content: str, *, ephemeral: bool = False):
     if interaction.response.is_done():
         await interaction.followup.send(
             content,
@@ -363,6 +379,16 @@ async def build_context(channel_id: str, user_id: str, username: str, spontaneou
         })
 
     if spontaneous:
+        now_dt = bot_local_dt()
+        tod = time_of_day_label(now_dt)
+        messages.append({
+            "role": "system",
+            "content": (
+                f"The bot local time is {now_dt.strftime('%H:%M')} ({tod}). "
+                "Never use a greeting that conflicts with the time. "
+                "If it is night, use cozy/sleepy vibes. If morning, use morning vibes."
+            )
+        })
         messages.append({
             "role": "system",
             "content": "You started the message because the chat is quiet. Keep it short, cute, and natural."
@@ -371,84 +397,7 @@ async def build_context(channel_id: str, user_id: str, username: str, spontaneou
     messages.extend(history)
     return messages
 
-# ================= SLASH COMMANDS =================
-@bot.tree.command(name="ask", description="Ask Fur Bot something directly")
-@app_commands.describe(prompt="What you want to ask")
-async def ask_cmd(interaction: discord.Interaction, prompt: str):
-    channel_id = str(interaction.channel_id or interaction.user.id)
-    user_id = str(interaction.user.id)
-    username = getattr(interaction.user, "display_name", None) or getattr(interaction.user, "global_name", None) or interaction.user.name
-
-    await interaction.response.defer(thinking=True)
-
-    try:
-        touch_channel(channel_id)
-
-        user_text = prompt.strip()
-        if not user_text:
-            await send_interaction(interaction, "mrrp~ say something first 🥺", ephemeral=True)
-            return
-
-        detected_mood = mood_from_text(user_text)
-        if detected_mood != "neutral":
-            channel_mood[channel_id] = detected_mood
-
-        await save_message(channel_id, user_id, "user", user_text)
-
-        if fact := extract_fact(user_text):
-            await save_fact_if_new(user_id, fact)
-
-        context = await build_context(channel_id, user_id, username, spontaneous=False)
-        reply = await ask_ai(context)
-        reply = fluff_wrap(reply, channel_mood.get(channel_id, "neutral"))
-
-        await save_message(channel_id, user_id, "assistant", reply)
-        remember_bot_talk(channel_id)
-
-        for i in range(0, len(reply), 1900):
-            chunk = reply[i:i+1900].strip()
-            if chunk:
-                await interaction.followup.send(chunk, allowed_mentions=discord.AllowedMentions.none())
-
-    except Exception:
-        print(traceback.format_exc())
-        await send_interaction(interaction, "mrrp~ something broke 🥺", ephemeral=True)
-
-@bot.tree.command(name="pet", description="Pet Fur Bot and make it happy")
-async def pet_cmd(interaction: discord.Interaction):
-    channel_id = str(interaction.channel_id or interaction.user.id)
-    channel_mood[channel_id] = "happy"
-    touch_channel(channel_id)
-    remember_bot_talk(channel_id)
-    await send_interaction(interaction, "mrrp~ purr purr >w< 🐾💕")
-
-@bot.tree.command(name="mood", description="Show the live mood in this channel")
-async def mood_cmd(interaction: discord.Interaction):
-    channel_id = str(interaction.channel_id or interaction.user.id)
-    await send_interaction(interaction, f"mrrp~ live mood here 🐾\n**{current_live_mood(channel_id)}**")
-
-@bot.tree.command(name="status", description="Show bot status")
-async def status_cmd(interaction: discord.Interaction):
-    if not await require_admin(interaction):
-        return
-
-    async with db.acquire() as conn:
-        msg_count = await conn.fetchval("SELECT COUNT(*) FROM messages")
-        admin_count = await conn.fetchval("SELECT COUNT(*) FROM admins")
-        fact_count = await conn.fetchval("SELECT COUNT(*) FROM user_facts")
-
-    channel_id = str(interaction.channel_id or interaction.user.id)
-    embed = discord.Embed(title="Fur Bot Status 🐾", color=discord.Color.magenta())
-    embed.add_field(name="Messages", value=str(msg_count), inline=True)
-    embed.add_field(name="Admins", value=str(admin_count), inline=True)
-    embed.add_field(name="Facts", value=str(fact_count), inline=True)
-    embed.add_field(name="Model", value=MODEL, inline=False)
-    embed.add_field(name="Mood", value=current_live_mood(channel_id), inline=False)
-    embed.add_field(name="Mode", value="full slash furry system", inline=False)
-    await send_interaction(interaction, "", ephemeral=False)
-    await interaction.followup.send(embed=embed)
-
-# ================= MEMORY GROUP =================
+# ================= MEMORY COMMANDS =================
 @memory_group.command(name="remember", description="Store a fact about you")
 @app_commands.describe(fact="Something Fur Bot should remember")
 async def memory_remember(interaction: discord.Interaction, fact: str):
@@ -475,7 +424,7 @@ async def memory_forgetme(interaction: discord.Interaction):
         print("FORGET ERROR:", repr(e))
         await send_interaction(interaction, "mrrp~ could not forget dat right now 🥺", ephemeral=True)
 
-# ================= ADMIN GROUP =================
+# ================= ADMIN COMMANDS =================
 @admin_group.command(name="add", description="Add a user as admin")
 @app_commands.describe(member="The member to add")
 async def admin_add(interaction: discord.Interaction, member: discord.Member):
@@ -540,6 +489,97 @@ async def admin_clearhistory(interaction: discord.Interaction):
         print("CLEAR HISTORY ERROR:", repr(e))
         await send_interaction(interaction, "mrrp~ could not clear history 🥺", ephemeral=True)
 
+# ================= SLASH CHAT + STATUS + MOOD + PET =================
+@bot.tree.command(name="ask", description="Ask Fur Bot something directly")
+@app_commands.describe(prompt="What you want to ask")
+async def ask_cmd(interaction: discord.Interaction, prompt: str):
+    channel_id = str(interaction.channel_id or interaction.user.id)
+    user_id = str(interaction.user.id)
+    username = getattr(interaction.user, "display_name", None) or getattr(interaction.user, "global_name", None) or interaction.user.name
+
+    await interaction.response.defer(thinking=True)
+
+    try:
+        touch_channel(channel_id)
+
+        user_text = prompt.strip()
+        if not user_text:
+            await interaction.followup.send("mrrp~ say something first 🥺", ephemeral=True)
+            return
+
+        detected_mood = mood_from_text(user_text)
+        if detected_mood != "neutral":
+            channel_mood[channel_id] = detected_mood
+
+        await save_message(channel_id, user_id, "user", user_text)
+
+        if fact := extract_fact(user_text):
+            await save_fact_if_new(user_id, fact)
+
+        context = await build_context(channel_id, user_id, username, spontaneous=False)
+        reply = await ask_ai(context)
+        reply = fluff_wrap(reply, channel_mood.get(channel_id, "neutral"))
+
+        await save_message(channel_id, user_id, "assistant", reply)
+        remember_bot_talk(channel_id)
+
+        for i in range(0, len(reply), 1900):
+            chunk = reply[i:i+1900].strip()
+            if chunk:
+                await interaction.followup.send(chunk, allowed_mentions=discord.AllowedMentions.none())
+
+    except Exception:
+        print(traceback.format_exc())
+        await interaction.followup.send("mrrp~ something broke 🥺", ephemeral=True)
+
+@bot.tree.command(name="pet", description="Pet Fur Bot and make it happy")
+async def pet_cmd(interaction: discord.Interaction):
+    channel_id = str(interaction.channel_id or interaction.user.id)
+    channel_mood[channel_id] = "happy"
+    touch_channel(channel_id)
+    remember_bot_talk(channel_id)
+    await send_interaction(interaction, "mrrp~ purr purr >w< 🐾💕")
+
+@bot.tree.command(name="mood", description="Show the live mood in this channel")
+async def mood_cmd(interaction: discord.Interaction):
+    channel_id = str(interaction.channel_id or interaction.user.id)
+    await send_interaction(interaction, f"mrrp~ live mood here 🐾\n**{current_live_mood(channel_id)}**")
+
+@bot.tree.command(name="time", description="Show the bot's local time")
+async def time_cmd(interaction: discord.Interaction):
+    now_dt = bot_local_dt()
+    tod = time_of_day_label(now_dt)
+    await send_interaction(
+        interaction,
+        f"mrrp~ bot local time is **{now_dt.strftime('%H:%M')}** ({tod}) 🐾"
+    )
+
+@bot.tree.command(name="status", description="Show bot status")
+async def status_cmd(interaction: discord.Interaction):
+    if not await require_admin(interaction):
+        return
+
+    await interaction.response.defer(thinking=False)
+
+    async with db.acquire() as conn:
+        msg_count = await conn.fetchval("SELECT COUNT(*) FROM messages")
+        admin_count = await conn.fetchval("SELECT COUNT(*) FROM admins")
+        fact_count = await conn.fetchval("SELECT COUNT(*) FROM user_facts")
+
+    channel_id = str(interaction.channel_id or interaction.user.id)
+    now_dt = bot_local_dt()
+
+    embed = discord.Embed(title="Fur Bot Status 🐾", color=discord.Color.magenta())
+    embed.add_field(name="Messages", value=str(msg_count), inline=True)
+    embed.add_field(name="Admins", value=str(admin_count), inline=True)
+    embed.add_field(name="Facts", value=str(fact_count), inline=True)
+    embed.add_field(name="Model", value=MODEL, inline=False)
+    embed.add_field(name="Mood", value=current_live_mood(channel_id), inline=False)
+    embed.add_field(name="Bot time", value=f"{now_dt.strftime('%H:%M')} ({time_of_day_label(now_dt)})", inline=False)
+    embed.add_field(name="Mode", value="full slash furry system", inline=False)
+
+    await interaction.followup.send(embed=embed)
+
 # ================= AUTO TALK =================
 async def auto_talk_loop():
     await bot.wait_until_ready()
@@ -583,11 +623,21 @@ async def auto_talk_loop():
         channel = random.choice(candidates)
         channel_id = str(channel.id)
         mood = channel_mood.get(channel_id, "neutral")
+        now_dt = bot_local_dt()
+        tod = time_of_day_label(now_dt)
 
         try:
             prompt = [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "system", "content": f"Current mood: {mood}"},
+                {
+                    "role": "system",
+                    "content": (
+                        f"The bot local time is {now_dt.strftime('%H:%M')} ({tod}). "
+                        "Never say a greeting that conflicts with the time. "
+                        "If it is night, use cozy/sleepy vibes. If morning, use morning vibes."
+                    )
+                },
                 {"role": "system", "content": "You are reviving a quiet Discord chat. Keep it short, cute, and natural."},
                 {"role": "user", "content": "Say one short fluffy message to gently start the chat again."}
             ]
@@ -607,7 +657,6 @@ async def on_message(message: discord.Message):
     if message.author.bot:
         return
 
-    # ignore regular prefix text; this is slash-first now
     if message.content.startswith("!"):
         return
 
