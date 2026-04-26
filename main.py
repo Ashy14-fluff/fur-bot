@@ -18,157 +18,94 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
 if not DISCORD_TOKEN or not GROQ_API_KEY or not DATABASE_URL:
-    raise RuntimeError("Missing env 🥺")
+    raise RuntimeError("Missing env vars 🥺")
 
-groq_client = Groq(api_key=GROQ_API_KEY)
+groq = Groq(api_key=GROQ_API_KEY)
 
 # ================= STATE =================
 bot_owner_id: Optional[int] = None
-admin_users: Set[str] = set()
+admins: Set[str] = set()
 
 SYSTEM_PROMPT = (
-    "You are Fur Bot 🐾. "
-    "You are cute, fluffy, helpful, and talk in uwu style. "
-    "Never be rude. Keep replies short and natural."
+    "You are Fur Bot 🐾, a cute fluffy AI companion. "
+    "You speak in soft uwu furry style, but stay helpful and readable. "
+    "You remember conversation context and act friendly."
 )
 
+# ================= BOT =================
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-db_pool: Optional[asyncpg.Pool] = None
+db: Optional[asyncpg.Pool] = None
 db_lock = asyncio.Lock()
 
-
-# ================= DB INIT =================
+# ================= DB =================
 async def init_db():
-    global db_pool
-    if db_pool:
+    global db
+    if db:
         return
 
     async with db_lock:
-        if db_pool:
+        if db:
             return
 
-        db_pool = await asyncpg.create_pool(DATABASE_URL)
+        db = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
 
-        async with db_pool.acquire() as conn:
-            await conn.execute("""CREATE TABLE IF NOT EXISTS admins(user_id TEXT PRIMARY KEY);""")
-            await conn.execute("""CREATE TABLE IF NOT EXISTS messages(
+        async with db.acquire() as conn:
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS admins(
+                user_id TEXT PRIMARY KEY
+            );
+            """)
+
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS messages(
                 id BIGSERIAL PRIMARY KEY,
                 channel_id TEXT,
                 user_id TEXT,
                 role TEXT,
                 content TEXT,
                 created_at TIMESTAMPTZ DEFAULT NOW()
-            );""")
+            );
+            """)
 
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_facts(
+                user_id TEXT,
+                fact TEXT
+            );
+            """)
 
 # ================= ADMIN =================
 async def is_admin(uid: str):
-    return uid in admin_users or (bot_owner_id and int(uid) == bot_owner_id)
+    return uid in admins or (bot_owner_id and int(uid) == bot_owner_id)
 
 
-async def cute_refuse(ctx, action: str):
-    msg = random.choice([
-        f"nuu~ yuw can't {action} 🥺 only admins can do dat~",
-        f"mrrp~ dat power is locked behind admin magic >w<",
-        f"sowwy fluffbutt~ no permission to {action} 🐾"
-    ])
-    await ctx.send(msg)
-
-
-# ================= ADMIN COMMANDS =================
-@bot.command()
-async def addadmin(ctx, member: discord.Member):
-    if not await is_admin(str(ctx.author.id)):
-        return await cute_refuse(ctx, "add admins")
-
-    async with db_pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO admins(user_id) VALUES($1) ON CONFLICT DO NOTHING",
-            str(member.id)
-        )
-
-    admin_users.add(str(member.id))
-    await ctx.send(f"added {member.mention} 🐾")
-
-
-@bot.command()
-async def removeadmin(ctx, member: discord.Member):
-    if not await is_admin(str(ctx.author.id)):
-        return await cute_refuse(ctx, "remove admins")
-
-    async with db_pool.acquire() as conn:
-        await conn.execute("DELETE FROM admins WHERE user_id=$1", str(member.id))
-
-    admin_users.discard(str(member.id))
-    await ctx.send(f"removed {member.mention} 🐾")
-
-
-# ================= MODERATION =================
-@bot.command()
-async def kick(ctx, member: discord.Member, *, reason=None):
-    if not await is_admin(str(ctx.author.id)):
-        return await cute_refuse(ctx, "kick people")
-
-    try:
-        await member.kick(reason=reason)
-        await ctx.send(f"kicked {member.mention} 🐾")
-    except discord.Forbidden:
-        await ctx.send("me no have permission 🥺")
-
-
-@bot.command()
-async def ban(ctx, member: discord.Member, *, reason=None):
-    if not await is_admin(str(ctx.author.id)):
-        return await cute_refuse(ctx, "ban people")
-
-    try:
-        await member.ban(reason=reason)
-        await ctx.send(f"banned {member.mention} 💢")
-    except discord.Forbidden:
-        await ctx.send("me no have permission 🥺")
-
-
-@bot.command()
-async def mute(ctx, member: discord.Member, minutes: int):
-    if not await is_admin(str(ctx.author.id)):
-        return await cute_refuse(ctx, "mute people")
-
-    until = discord.utils.utcnow() + timedelta(minutes=minutes)
-
-    try:
-        await member.timeout(until)
-        await ctx.send(f"muted {member.mention} for {minutes}m 🐾")
-    except Exception:
-        await ctx.send("failed to mute 🥺")
-
-
-@bot.command()
-async def unmute(ctx, member: discord.Member):
-    if not await is_admin(str(ctx.author.id)):
-        return await cute_refuse(ctx, "unmute people")
-
-    await member.timeout(None)
-    await ctx.send(f"unmuted {member.mention} 💖")
+async def cute_deny(ctx, action):
+    replies = [
+        f"nuu~ yuw can't {action} 🥺",
+        f"mrrp~ only admins can do dat >w<",
+        f"locked behind admin magic~ ✨"
+    ]
+    await ctx.send(random.choice(replies))
 
 
 # ================= MEMORY =================
-async def save_message(channel_id, user_id, role, content):
+async def save_msg(channel_id, user_id, role, content):
     await init_db()
-    async with db_pool.acquire() as conn:
+    async with db.acquire() as conn:
         await conn.execute(
             "INSERT INTO messages(channel_id,user_id,role,content) VALUES($1,$2,$3,$4)",
             channel_id, user_id, role, content[:2000]
         )
 
 
-async def load_history(channel_id, limit=12):
-    async with db_pool.acquire() as conn:
+async def load_history(channel_id):
+    async with db.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT role,content FROM messages WHERE channel_id=$1 ORDER BY id DESC LIMIT $2",
-            channel_id, limit
+            "SELECT role,content FROM messages WHERE channel_id=$1 ORDER BY id DESC LIMIT 12",
+            channel_id
         )
     return list(reversed([{"role": r["role"], "content": r["content"]} for r in rows]))
 
@@ -176,15 +113,24 @@ async def load_history(channel_id, limit=12):
 # ================= AI =================
 async def ask_ai(messages):
     def run():
-        res = groq_client.chat.completions.create(
+        res = groq.chat.completions.create(
             model=GROQ_MODEL,
             messages=messages,
-            temperature=0.9,
-            max_tokens=800
+            temperature=0.85,
+            max_tokens=600
         )
         return res.choices[0].message.content
 
-    return await asyncio.to_thread(run)
+    try:
+        return await asyncio.to_thread(run)
+    except Exception as e:
+        print("AI error:", e)
+        return "mrrp… me brain lagged 🥺 try again~"
+
+
+# ================= UTIL =================
+def split(text):
+    return [text[i:i+1900] for i in range(0, len(text), 1900)] or ["..."]
 
 
 # ================= READY =================
@@ -192,8 +138,62 @@ async def ask_ai(messages):
 async def on_ready():
     global bot_owner_id
     await init_db()
-    bot_owner_id = (await bot.application_info()).owner.id
-    print("bot ready 🐾")
+    app = await bot.application_info()
+    bot_owner_id = app.owner.id
+    print(f"Bot ready 🐾 | Owner: {bot_owner_id}")
+
+
+# ================= ADMIN COMMANDS =================
+@bot.command()
+async def addadmin(ctx, member: discord.Member):
+    if not await is_admin(str(ctx.author.id)):
+        return await cute_deny(ctx, "add admins")
+
+    async with db.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO admins(user_id) VALUES($1) ON CONFLICT DO NOTHING",
+            str(member.id)
+        )
+
+    admins.add(str(member.id))
+    await ctx.send(f"added {member.mention} 🐾")
+
+
+@bot.command()
+async def removeadmin(ctx, member: discord.Member):
+    if not await is_admin(str(ctx.author.id)):
+        return await cute_deny(ctx, "remove admins")
+
+    async with db.acquire() as conn:
+        await conn.execute("DELETE FROM admins WHERE user_id=$1", str(member.id))
+
+    admins.discard(str(member.id))
+    await ctx.send(f"removed {member.mention} 🐾")
+
+
+# ================= MODERATION =================
+@bot.command()
+async def kick(ctx, member: discord.Member):
+    if not await is_admin(str(ctx.author.id)):
+        return await cute_deny(ctx, "kick people")
+
+    try:
+        await member.kick()
+        await ctx.send(f"kicked {member.mention} 🐾")
+    except:
+        await ctx.send("failed 🥺")
+
+
+@bot.command()
+async def ban(ctx, member: discord.Member):
+    if not await is_admin(str(ctx.author.id)):
+        return await cute_deny(ctx, "ban people")
+
+    try:
+        await member.ban()
+        await ctx.send(f"banned {member.mention} 💢")
+    except:
+        await ctx.send("failed 🥺")
 
 
 # ================= CHAT =================
@@ -209,7 +209,7 @@ async def on_message(message):
     channel_id = str(message.channel.id)
     user_id = str(message.author.id)
 
-    await save_message(channel_id, user_id, "user", message.content)
+    await save_msg(channel_id, user_id, "user", message.content)
 
     async with message.channel.typing():
         history = await load_history(channel_id)
@@ -222,9 +222,10 @@ async def on_message(message):
 
         reply = await ask_ai(ctx)
 
-        await save_message(channel_id, user_id, "assistant", reply)
+        await save_msg(channel_id, user_id, "assistant", reply)
 
-        await message.channel.send(reply)
+        for part in split(reply):
+            await message.channel.send(part)
 
 
 bot.run(DISCORD_TOKEN)
