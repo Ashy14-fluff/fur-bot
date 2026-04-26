@@ -142,6 +142,7 @@ async def remove_admin(user_id: str) -> bool:
         return False
 
 
+# === All your DB functions (unchanged) ===
 async def upsert_user_profile(user_id: str, display_name: str) -> None:
     await init_db()
     assert db_pool is not None
@@ -271,25 +272,9 @@ async def build_context(channel_id: str, user_id: str, display_name: str) -> Lis
     ]
 
     if profile:
-        messages.append(
-            {
-                "role": "system",
-                "content": (
-                    "Persistent user profile: "
-                    f"user_id={profile['user_id']}; "
-                    f"display_name={profile['display_name']}; "
-                    f"first_seen={profile['first_seen']}; "
-                    f"last_seen={profile['last_seen']}."
-                ),
-            }
-        )
+        messages.append({"role": "system", "content": f"Persistent user profile: user_id={profile['user_id']}; display_name={profile['display_name']}; first_seen={profile['first_seen']}; last_seen={profile['last_seen']}."})
     if facts:
-        messages.append(
-            {
-                "role": "system",
-                "content": "Persistent facts about this user:\n- " + "\n- ".join(facts),
-            }
-        )
+        messages.append({"role": "system", "content": "Persistent facts about this user:\n- " + "\n- ".join(facts)})
 
     messages.extend(channel_history)
     return messages
@@ -318,11 +303,23 @@ async def on_ready():
     await bot.change_presence(activity=discord.Game(name="fluffy & naughty chats 🐾"))
 
 
+# === Cute Refusal Function ===
+async def cute_refuse(ctx, action: str):
+    responses = [
+        f"hehe~ only special admins can {action}... me’m sowwy but yuw not allowed yet >w<",
+        f"mrrp... yuw twying to be a big bad admin? dat’s cuuuute but me can onwy wisten to weal admins uwu~",
+        f"nuuu~ me no can wet yuw {action}... onwy mah twusted admins get dat powew rawr~",
+        f"awww yuw want to {action}? dat’s vewy bold~ but me hafta say no... onwy admins pwease~ 🥺",
+        f"teehee~ me wuv when yuw twy but... onwy admins awe awwowed to {action} heheh~",
+    ]
+    await ctx.send(random.choice(responses))
+
+
 # === Admin Commands ===
 @bot.command()
 async def addadmin(ctx, member: discord.Member = None):
     if str(ctx.author.id) != str(bot_owner_id):
-        return await ctx.send("only mah owner can add admins... >w<")
+        return await cute_refuse(ctx, "add admins")
     if not member:
         return await ctx.send("mention someone~")
     if await add_admin(str(member.id)):
@@ -334,7 +331,7 @@ async def addadmin(ctx, member: discord.Member = None):
 @bot.command()
 async def removeadmin(ctx, member: discord.Member = None):
     if str(ctx.author.id) != str(bot_owner_id):
-        return await ctx.send("only owner can remove admins uwu")
+        return await cute_refuse(ctx, "remove admins")
     if not member:
         return await ctx.send("mention who~")
     if await remove_admin(str(member.id)):
@@ -351,11 +348,11 @@ async def admins(ctx):
     await ctx.send("current admins:\n" + "\n".join(mentions))
 
 
-# === Moderation Commands ===
+# === Moderation Commands with cute refusals ===
 @bot.command()
 async def kick(ctx, member: discord.Member = None, *, reason: str = None):
     if not await is_admin(str(ctx.author.id)):
-        return await ctx.send("only admins can kick... sowwy >w<")
+        return await cute_refuse(ctx, "kick people")
     if not member:
         return await ctx.send("mention who to kick~")
     try:
@@ -370,7 +367,7 @@ async def kick(ctx, member: discord.Member = None, *, reason: str = None):
 @bot.command()
 async def ban(ctx, member: discord.Member = None, *, reason: str = None):
     if not await is_admin(str(ctx.author.id)):
-        return await ctx.send("only admins can ban... >w<")
+        return await cute_refuse(ctx, "ban people")
     if not member:
         return await ctx.send("mention who to ban~")
     try:
@@ -385,32 +382,29 @@ async def ban(ctx, member: discord.Member = None, *, reason: str = None):
 @bot.command()
 async def mute(ctx, member: discord.Member = None, duration: str = None, *, reason: str = None):
     if not await is_admin(str(ctx.author.id)):
-        return await ctx.send("only admins can mute... >w<")
+        return await cute_refuse(ctx, "mute someone")
     if not member or not duration:
         return await ctx.send("use: !mute @user 10m [reason]")
-
+    # ... (time parsing stays da same)
     unit = duration[-1].lower()
     try:
         value = int(duration[:-1])
     except ValueError:
         return await ctx.send("time must be like 10m, 2h, 1d~")
-
     if unit == "s": secs = value
     elif unit == "m": secs = value * 60
     elif unit == "h": secs = value * 3600
     elif unit == "d": secs = value * 86400
     else:
         return await ctx.send("use s/m/h/d only~")
-
     if secs > 2419200:
         return await ctx.send("max timeout is 28 days~")
-
     try:
         until = discord.utils.utcnow() + timedelta(seconds=secs)
         await member.timeout(until, reason=reason or f"Muted by {ctx.author}")
         await ctx.send(f"muted {member.mention} fow {duration}~ quiet time~ 🐾")
     except discord.Forbidden:
-        await ctx.send("me no have Moderate Members permission... give me powew pwease~")
+        await ctx.send("me no have Moderate Members / Timeout Members permission... give me powew pwease~")
     except Exception:
         await ctx.send("oopsie, mute failed 🥺")
 
@@ -418,7 +412,7 @@ async def mute(ctx, member: discord.Member = None, duration: str = None, *, reas
 @bot.command()
 async def unmute(ctx, member: discord.Member = None):
     if not await is_admin(str(ctx.author.id)):
-        return await ctx.send("only admins can unmute... >w<")
+        return await cute_refuse(ctx, "unmute someone")
     if not member:
         return await ctx.send("mention who to unmute~")
     try:
@@ -430,12 +424,12 @@ async def unmute(ctx, member: discord.Member = None):
         await ctx.send("oopsie, unmute failed 🥺")
 
 
-# === Lewd Commands (admin only) ===
+# === Lewd Commands with cute refusals ===
 @bot.command()
 async def nsfw(ctx, mode: str = "on"):
     global lewd_level
     if not await is_admin(str(ctx.author.id)):
-        return await ctx.send("only admins can change nsfw mode... sowwy >w<")
+        return await cute_refuse(ctx, "change nsfw mode")
     mode = mode.lower()
     if mode == "on":
         lewd_level = max(lewd_level, 2)
@@ -451,7 +445,7 @@ async def nsfw(ctx, mode: str = "on"):
 async def lewd(ctx, level: int = None):
     global lewd_level
     if not await is_admin(str(ctx.author.id)):
-        return await ctx.send("only admins can change lewd level uwu")
+        return await cute_refuse(ctx, "change lewd level")
     if level is None:
         return await ctx.send(f"current lewd level **{lewd_level}/3** 🐾")
     if 0 <= level <= 3:
@@ -462,6 +456,7 @@ async def lewd(ctx, level: int = None):
         await ctx.send("level must be 0-3~")
 
 
+# Normal commands (no change)
 @bot.command()
 async def remember(ctx, *, fact: str):
     await save_user_fact(str(ctx.author.id), fact)
@@ -518,10 +513,7 @@ async def on_message(message: discord.Message):
             await save_message(channel_id, user_id, "assistant", reply)
 
             for chunk in split_message(reply):
-                await message.channel.send(
-                    chunk,
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
+                await message.channel.send(chunk, allowed_mentions=discord.AllowedMentions.none())
 
             if random.random() < 0.25:
                 await message.add_reaction("🐾")
