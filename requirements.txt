@@ -2,3 +2,4 @@ discord.py
 groq
 python-dotenv
 asyncpg
+flask
