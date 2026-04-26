@@ -355,7 +355,7 @@ async def remember(ctx: commands.Context, *, fact: str):
 async def facts(ctx: commands.Context):
     facts_list = await load_user_facts(str(ctx.author.id), limit=8)
     if not facts_list:
-        await ctx.send("me don’t know any facts about you yet 🥺")
+        await ctx.send("me don't know any facts about you yet 🥺")
         return
 
     text = "\n".join(f"• {f}" for f in facts_list)
@@ -394,7 +394,9 @@ async def on_message(message: discord.Message):
     try:
         scope_key = get_scope_key(message)
         user_id = str(message.author.id)
+        bot_user_id = str(bot.user.id)  # ✅ FIXED: Bot's own user ID
         display_name = get_display_name(message.author)
+        channel_id = str(message.channel.id)  # ✅ FIXED: Proper channel ID
         channel_key = scope_key
 
         global_mood = await get_setting("global_mood", "neutral")
@@ -408,7 +410,9 @@ async def on_message(message: discord.Message):
         current_mood = channel_mood.get(channel_key, global_mood)
 
         await upsert_user_profile(user_id, display_name)
-        await save_message(scope_key, channel_key, user_id, "user", content)
+        
+        # ✅ FIXED: Proper channel_id parameter
+        await save_message(scope_key, channel_id, user_id, "user", content)
 
         async with message.channel.typing():
             context = await build_context(
@@ -429,7 +433,8 @@ async def on_message(message: discord.Message):
 
             reply = apply_mood_to_reply(reply, current_mood)
 
-            await save_message(scope_key, channel_key, user_id, "bot", reply)
+            # ✅ FIXED: Proper channel_id and bot_user_id
+            await save_message(scope_key, channel_id, bot_user_id, "bot", reply)
 
             for chunk in split_message(reply):
                 await message.channel.send(chunk)
