@@ -217,7 +217,7 @@ async def load_conversation_context(channel_id: str) -> List[dict]:
                     "content": r["content"]
                 })
 
-        print(f"📚 Loaded {len(history)} messages from last {hour_window}h")
+        print(f"📚 Loaded {len(history)} messages from last {hour_window}h for channel {channel_id}")
         return history
         
     except Exception as e:
@@ -530,8 +530,12 @@ async def memory_info(ctx):
         msg_limit, hour_window = await get_channel_settings(str(ctx.channel.id))
         
         async with db.acquire() as conn:
-            count = await conn.fetchval(
+            total = await conn.fetchval(
                 "SELECT COUNT(*) FROM messages WHERE channel_id=$1",
+                str(ctx.channel.id)
+            )
+            recent = await conn.fetchval(
+                f"SELECT COUNT(*) FROM messages WHERE channel_id=$1 AND created_at > NOW() - INTERVAL '{hour_window} hours'",
                 str(ctx.channel.id)
             )
         
@@ -543,7 +547,8 @@ async def memory_info(ctx):
         )
         embed.add_field(name="Active Memory", value=f"Last **{msg_limit}** messages", inline=True)
         embed.add_field(name="Time Window", value=f"**{hour_window}** hours ({days:.1f} days)", inline=True)
-        embed.add_field(name="Total Stored", value=f"**{count}** messages", inline=True)
+        embed.add_field(name="Recent Messages", value=f"**{recent}** in window", inline=True)
+        embed.add_field(name="Total Stored", value=f"**{total}** messages", inline=False)
         
         await ctx.send(embed=embed)
         
@@ -571,33 +576,24 @@ async def check_history(ctx):
                 str(ctx.channel.id)
             )
         
-        # Build message preview
-        message_preview = []
-        for r in rows:
-            timestamp = r['created_at'].strftime("%Y-%m-%d %H:%M:%S")
-            content_preview = r['content'][:50].replace('\n', ' ')
-            message_preview.append(f"**{r['username']}** ({r['role']}) [{timestamp}]\n`{content_preview}...`")
+        embed = discord.Embed(title="📊 History Debug", color=discord.Color.blue())
+        embed.add_field(name="Total Messages", value=total, inline=True)
+        embed.add_field(name="Last 72h", value=recent, inline=True)
         
-        embed = discord.Embed(
-            title="📊 History Debug",
-            description=f"Channel: {ctx.channel.mention}",
-            color=discord.Color.green() if total > 0 else discord.Color.red()
-        )
-        embed.add_field(name="✅ Total Messages", value=f"**{total}** messages stored", inline=True)
-        embed.add_field(name="📌 Last 72h", value=f"**{recent}** messages (active)", inline=True)
-        
-        if message_preview:
-            embed.add_field(name="Last 10 Messages", value="\n\n".join(message_preview[:5]), inline=False)
-            embed.set_footer(text=f"Database connection: ✓ Working")
+        if rows:
+            message_list = "\n".join([
+                f"**{r['username']}** ({r['role']}): {r['content'][:60]}...\n__{format_timestamp(r['created_at'])}__" 
+                for r in rows
+            ])
+            embed.add_field(name="Last 10 Messages", value=message_list[:1024], inline=False)
         else:
-            embed.add_field(name="Status", value="⚠️ No messages found!", inline=False)
-            embed.set_footer(text="Check if messages are being saved...")
+            embed.add_field(name="Last 10 Messages", value="*No messages found*", inline=False)
         
         await ctx.send(embed=embed)
         
     except Exception as e:
         print(f"❌ Check history error: {e}")
-        await ctx.send(f"❌ Database error: {str(e)[:100]}")
+        await ctx.send(f"Error: {e}")
 
 
 # ================= STATUS COMMANDS =================
@@ -628,24 +624,44 @@ async def status(ctx):
         await ctx.send("status check failed 🥺")
 
 
-@bot.command(name="help")
-async def help_cmd(ctx):
-    """Show available commands"""
+@bot.command(name="commands")
+async def list_commands(ctx):
+    """Show all available commands"""
     embed = discord.Embed(
-        title="Fur Bot Help 🐾",
-        description="Here are all my commands!",
+        title="Fur Bot Commands 🐾",
+        description="All available commands",
         color=discord.Color.purple()
     )
     
-    embed.add_field(name="💬 Chat", value="Just talk to me normally! I remember conversations.", inline=False)
+    embed.add_field(
+        name="💬 Chat",
+        value="Just chat normally! Bot responds with uwu style",
+        inline=False
+    )
     
-    embed.add_field(name="👑 Admin Commands", value="`!addadmin @user` - Add admin\n`!removeadmin @user` - Remove admin\n`!listadmins` - List all admins", inline=False)
+    embed.add_field(
+        name="👤 Admin Commands",
+        value="`!addadmin @user` - Add admin\n`!removeadmin @user` - Remove admin\n`!listadmins` - List all admins",
+        inline=False
+    )
     
-    embed.add_field(name="🔨 Moderation", value="`!kick @user [reason]` - Kick user\n`!ban @user [reason]` - Ban user\n`!unban <user_id>` - Unban user", inline=False)
+    embed.add_field(
+        name="🛡️ Moderation",
+        value="`!kick @user [reason]` - Kick user\n`!ban @user [reason]` - Ban user\n`!unban <user_id>` - Unban user",
+        inline=False
+    )
     
-    embed.add_field(name="💾 Memory", value="`!memoryconfig [msgs] [hours]` - Set memory\n`!memoryinfo` - Show settings\n`!clearhistory` - Delete all messages\n`!checkhistory` - Debug history", inline=False)
+    embed.add_field(
+        name="📚 Memory Management",
+        value="`!memoryconfig [msgs] [hours]` - Set memory\n`!memoryinfo` - Show memory settings\n`!checkhistory` - Debug messages\n`!clearhistory` - Clear all history",
+        inline=False
+    )
     
-    embed.add_field(name="ℹ️ Status", value="`!ping` - Check latency\n`!status` - Bot info\n`!help` - This message", inline=False)
+    embed.add_field(
+        name="📊 Status",
+        value="`!ping` - Check latency\n`!status` - Bot status\n`!commands` - This message",
+        inline=False
+    )
     
     await ctx.send(embed=embed)
 
