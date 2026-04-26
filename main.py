@@ -98,7 +98,7 @@ async def init_db():
             CREATE TABLE IF NOT EXISTS channel_settings(
                 channel_id TEXT PRIMARY KEY,
                 context_messages INT DEFAULT 25,
-                context_hours INT DEFAULT 24,
+                context_hours INT DEFAULT 72,
                 ai_enabled BOOLEAN DEFAULT TRUE,
                 created_at TIMESTAMPTZ DEFAULT NOW()
             );
@@ -159,8 +159,8 @@ async def get_channel_settings(channel_id: str):
     except Exception as e:
         print(f"⚠ Failed to get channel settings: {e}")
     
-    # Default: 25 messages, 24-hour window (good balance)
-    return 25, 24
+    # DEFAULT: 25 messages, 72 hours (3 days) ← INCREASED FROM 24 HOURS
+    return 25, 72
 
 
 async def save_msg(channel_id: str, user_id: str, username: str, role: str, content: str):
@@ -181,7 +181,7 @@ async def load_conversation_context(channel_id: str) -> List[dict]:
     """Load smart conversation context with optimal balance
     
     - Loads recent messages from the channel
-    - Respects time window (default 24 hours)
+    - Respects time window (default 72 hours = 3 days)
     - Caps at message limit (default 25 messages)
     - Includes usernames for context
     - Reverses to chronological order
@@ -216,7 +216,7 @@ async def load_conversation_context(channel_id: str) -> List[dict]:
                     "content": r["content"]
                 })
 
-        print(f"📚 Loaded {len(history)} messages for context")
+        print(f"📚 Loaded {len(history)} messages from last {hour_window}h")
         return history
         
     except Exception as e:
@@ -321,6 +321,7 @@ async def on_ready():
         
         print(f"✓ Bot ready 🐾 | Owner: {bot_owner_id}")
         print(f"✓ Admins: {len(admins)} | Model: {GROQ_MODEL}")
+        print(f"✓ Memory: 72 hours (3 days) by default")
         
     except Exception as e:
         print(f"❌ Startup error: {e}")
@@ -478,12 +479,17 @@ async def clear_history(ctx):
 
 
 @bot.command(name="memoryconfig")
-async def memory_config(ctx, messages: int = 25, hours: int = 24):
+async def memory_config(ctx, messages: int = 25, hours: int = 72):
     """Configure memory settings for this channel
     
     Usage: !memoryconfig [messages] [hours]
-    Default: 25 messages, 24 hours
-    Min: 5 messages, 1 hour | Max: 100 messages, 168 hours (1 week)
+    Default: 25 messages, 72 hours (3 days)
+    Min: 5 messages, 1 hour | Max: 100 messages, 336 hours (2 weeks)
+    
+    Examples:
+    !memoryconfig           → Reset to defaults (25, 72h)
+    !memoryconfig 50        → 50 messages, 72h
+    !memoryconfig 30 168    → 30 messages, 168h (1 week)
     """
     if not await is_admin(str(ctx.author.id)):
         return await deny(ctx, "change memory settings")
@@ -493,8 +499,8 @@ async def memory_config(ctx, messages: int = 25, hours: int = 24):
         await ctx.send("messages must be 5-100~ 🥺")
         return
     
-    if hours < 1 or hours > 168:
-        await ctx.send("hours must be 1-168~ 🥺")
+    if hours < 1 or hours > 336:
+        await ctx.send("hours must be 1-336 (max 2 weeks)~ 🥺")
         return
 
     try:
@@ -507,7 +513,8 @@ async def memory_config(ctx, messages: int = 25, hours: int = 24):
                 str(ctx.channel.id), messages, hours
             )
         
-        await ctx.send(f"✓ Memory set to **{messages}** messages, **{hours}** hours 🐾✨")
+        days = hours / 24
+        await ctx.send(f"✓ Memory set to **{messages}** messages, **{hours}** hours ({days:.1f} days) 🐾✨")
         print(f"✓ Memory config updated: {messages}msg, {hours}h")
         
     except Exception as e:
@@ -527,13 +534,14 @@ async def memory_info(ctx):
                 str(ctx.channel.id)
             )
         
+        days = hour_window / 24
         embed = discord.Embed(
             title="📚 Memory Info",
             description=f"Channel: {ctx.channel.mention}",
             color=discord.Color.blue()
         )
         embed.add_field(name="Active Memory", value=f"Last **{msg_limit}** messages", inline=True)
-        embed.add_field(name="Time Window", value=f"**{hour_window}** hours", inline=True)
+        embed.add_field(name="Time Window", value=f"**{hour_window}** hours ({days:.1f} days)", inline=True)
         embed.add_field(name="Total Stored", value=f"**{count}** messages", inline=True)
         
         await ctx.send(embed=embed)
@@ -563,6 +571,7 @@ async def status(ctx):
         embed.add_field(name="Model", value=GROQ_MODEL, inline=True)
         embed.add_field(name="Admins", value=len(admins), inline=True)
         embed.add_field(name="Latency", value=f"{round(bot.latency * 1000)}ms", inline=True)
+        embed.add_field(name="Memory", value="📚 72 hours (3 days)", inline=False)
         embed.add_field(name="Uptime", value="💫 *running smooth*", inline=False)
         
         await ctx.send(embed=embed)
@@ -593,7 +602,7 @@ async def on_message(message):
 
     try:
         async with message.channel.typing():
-            # Load conversation context (smart memory)
+            # Load conversation context (smart memory with 72 hour window)
             history = await load_conversation_context(channel_id)
 
             # Build context for AI
