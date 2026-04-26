@@ -3,7 +3,7 @@ import time
 import asyncio
 import random
 from datetime import datetime, timezone
-from typing import Optional, List, Dict
+from typing import Optional, List
 
 import asyncpg
 import discord
@@ -27,41 +27,14 @@ if not DATABASE_URL:
 
 groq_client = Groq(api_key=GROQ_API_KEY)
 
-DEFAULT_CHARACTERS = [
-    (
-        "fur",
-        "Fur Bot",
-        "🐾",
-        "You are Fur Bot 🐾, a cute fluffy Discord AI companion. "
-        "You speak in a soft furry style with occasional uwu, >w<, mrrp, and cute reactions, "
-        "but you must stay readable and helpful. "
-        "You remember recent conversation context and persistent user facts. "
-        "You are warm, playful, emotionally aware, and natural. "
-        "Do not be robotic."
-    ),
-    (
-        "shisha",
-        "Shisha",
-        "💖",
-        "You are Shisha 💖, a warm, affectionate, playful fluffy companion. "
-        "You speak gently, lovingly, and in a cute readable style. "
-        "You can be a little goofy, emotionally expressive, and caring."
-    ),
-    (
-        "serious",
-        "Serious Bot",
-        "🧠",
-        "You are Serious Bot 🧠, calm, direct, precise, and helpful. "
-        "You avoid fluff unless the user asks for it."
-    ),
-    (
-        "gremlin",
-        "Gremlin Bot",
-        "😼",
-        "You are Gremlin Bot 😼, chaotic, playful, mischievous, and funny. "
-        "You are still helpful, but with energetic gremlin vibes."
-    ),
-]
+SYSTEM_PROMPT = (
+    "You are Fur Bot 🐾, a cute fluffy Discord AI companion. "
+    "You speak in a soft furry style with occasional uwu, >w<, mrrp, and cute reactions, "
+    "but you must stay readable and helpful. "
+    "You remember recent conversation context and persistent user facts. "
+    "You are warm, playful, emotionally aware, and natural. "
+    "Do not be robotic."
+)
 
 MOOD_OPTIONS = ["neutral", "playful", "soft", "excited", "sleepy"]
 
@@ -72,10 +45,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 db_pool: Optional[asyncpg.Pool] = None
 db_lock = asyncio.Lock()
-
-channel_mood: Dict[str, str] = {}
-
-SYSTEM_FALLBACK = DEFAULT_CHARACTERS[0][3]
+channel_mood: dict[str, str] = {}
 
 
 async def init_db() -> None:
@@ -94,22 +64,6 @@ async def init_db() -> None:
                 CREATE TABLE IF NOT EXISTS bot_settings (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
-                );
-            """)
-
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS characters (
-                    id TEXT PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    emoji TEXT NOT NULL,
-                    prompt TEXT NOT NULL
-                );
-            """)
-
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS channel_characters (
-                    channel_id TEXT PRIMARY KEY,
-                    character_id TEXT NOT NULL
                 );
             """)
 
@@ -136,7 +90,6 @@ async def init_db() -> None:
                     id BIGSERIAL PRIMARY KEY,
                     scope_id TEXT NOT NULL,
                     channel_id TEXT NOT NULL,
-                    character_id TEXT NOT NULL,
                     user_id TEXT NOT NULL,
                     role TEXT NOT NULL,
                     content TEXT NOT NULL,
@@ -147,7 +100,6 @@ async def init_db() -> None:
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_scope_id_id ON messages(scope_id, id);")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_user_id_id ON messages(user_id, id);")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_user_facts_user_id_id ON user_facts(user_id, id);")
-            await conn.execute("CREATE INDEX IF NOT EXISTS idx_channel_characters_channel_id ON channel_characters(channel_id);")
 
 
 async def get_setting(key: str, default: str) -> str:
@@ -169,36 +121,8 @@ async def set_setting(key: str, value: str) -> None:
         """, key, value)
 
 
-async def upsert_character(character_id: str, name: str, emoji: str, prompt: str) -> None:
-    await init_db()
-    assert db_pool is not None
-    character_id = normalize_id(character_id)
-    name = (name or character_id).strip()
-    emoji = (emoji or "🐾").strip()[:8]
-    prompt = (prompt or "").strip() or SYSTEM_FALLBACK
-
-    async with db_pool.acquire() as conn:
-        await conn.execute("""
-            INSERT INTO characters (id, name, emoji, prompt)
-            VALUES ($1, $2, $3, $4)
-            ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, emoji = EXCLUDED.emoji, prompt = EXCLUDED.prompt;
-        """, character_id, name, emoji, prompt)
-
-
 async def ensure_defaults() -> None:
     await set_setting("global_mood", await get_setting("global_mood", "neutral"))
-    await set_setting("default_character_id", await get_setting("default_character_id", "fur"))
-
-    for cid, name, emoji, prompt in DEFAULT_CHARACTERS:
-        await upsert_character(cid, name, emoji, prompt)
-
-
-def normalize_id(text: str) -> str:
-    allowed = []
-    for ch in (text or "").strip().lower():
-        if ch.isalnum() or ch in {"_", "-"}:
-            allowed.append(ch)
-    return "".join(allowed)
 
 
 def normalize_mood(text: str) -> str:
@@ -210,7 +134,7 @@ def get_display_name(author: discord.abc.User) -> str:
     return getattr(author, "display_name", None) or getattr(author, "global_name", None) or author.name
 
 
-def get_channel_key(message: discord.Message) -> str:
+def get_scope_key(message: discord.Message) -> str:
     if message.guild is None:
         return f"dm_{message.author.id}"
     return f"ch_{message.channel.id}"
@@ -239,71 +163,6 @@ def apply_mood_to_reply(reply: str, mood: str) -> str:
     if mood == "playful":
         return reply + "\n\n*wiggle wiggle* >w< 🐾"
     return reply
-
-
-async def fetch_character(character_id: str) -> Optional[dict]:
-    await init_db()
-    assert db_pool is not None
-    character_id = normalize_id(character_id)
-    async with db_pool.acquire() as conn:
-        row = await conn.fetchrow("""
-            SELECT id, name, emoji, prompt
-            FROM characters
-            WHERE id = $1;
-        """, character_id)
-    return dict(row) if row else None
-
-
-async def get_character(character_id: str) -> dict:
-    row = await fetch_character(character_id)
-    if row:
-        return row
-    fallback = await fetch_character("fur")
-    if fallback:
-        return fallback
-    return {
-        "id": "fur",
-        "name": "Fur Bot",
-        "emoji": "🐾",
-        "prompt": SYSTEM_FALLBACK,
-    }
-
-
-async def get_default_character_id() -> str:
-    return normalize_id(await get_setting("default_character_id", "fur")) or "fur"
-
-
-async def get_global_mood() -> str:
-    return normalize_mood(await get_setting("global_mood", "neutral"))
-
-
-async def set_channel_character(channel_id: str, character_id: str) -> None:
-    await init_db()
-    assert db_pool is not None
-    character_id = normalize_id(character_id)
-    async with db_pool.acquire() as conn:
-        await conn.execute("""
-            INSERT INTO channel_characters (channel_id, character_id)
-            VALUES ($1, $2)
-            ON CONFLICT (channel_id) DO UPDATE SET character_id = EXCLUDED.character_id;
-        """, channel_id, character_id)
-
-
-async def get_channel_character(channel_id: str) -> dict:
-    await init_db()
-    assert db_pool is not None
-    async with db_pool.acquire() as conn:
-        row = await conn.fetchrow("""
-            SELECT c.id, c.name, c.emoji, c.prompt
-            FROM channel_characters cc
-            JOIN characters c ON c.id = cc.character_id
-            WHERE cc.channel_id = $1;
-        """, channel_id)
-
-    if row:
-        return dict(row)
-
-    return await get_character(await get_default_character_id())
 
 
 async def upsert_user_profile(user_id: str, display_name: str) -> None:
@@ -365,11 +224,11 @@ async def delete_user_memory(user_id: str) -> None:
         await conn.execute("DELETE FROM user_profiles WHERE user_id = $1;", user_id)
 
 
-async def delete_channel_memory(channel_id: str) -> None:
+async def delete_scope_memory(scope_id: str) -> None:
     await init_db()
     assert db_pool is not None
     async with db_pool.acquire() as conn:
-        await conn.execute("DELETE FROM messages WHERE channel_id = $1;", channel_id)
+        await conn.execute("DELETE FROM messages WHERE scope_id = $1;", scope_id)
 
 
 async def load_scope_history(scope_id: str, limit: int = 14) -> List[dict]:
@@ -389,7 +248,6 @@ async def load_scope_history(scope_id: str, limit: int = 14) -> List[dict]:
 async def save_message(
     scope_id: str,
     channel_id: str,
-    character_id: str,
     user_id: str,
     role: str,
     content: str,
@@ -398,9 +256,9 @@ async def save_message(
     assert db_pool is not None
     async with db_pool.acquire() as conn:
         await conn.execute("""
-            INSERT INTO messages (scope_id, channel_id, character_id, user_id, role, content)
-            VALUES ($1, $2, $3, $4, $5, $6);
-        """, scope_id, channel_id, character_id, user_id, role, content[:4000])
+            INSERT INTO messages (scope_id, channel_id, user_id, role, content)
+            VALUES ($1, $2, $3, $4, $5);
+        """, scope_id, channel_id, user_id, role, content[:4000])
 
 
 def split_message(text: str, limit: int = 1900):
@@ -415,7 +273,6 @@ async def build_context(
     channel_key: str,
     user_id: str,
     display_name: str,
-    character: dict,
     current_mood: str,
     global_mood: str,
 ) -> List[dict]:
@@ -424,13 +281,7 @@ async def build_context(
     history = await load_scope_history(scope_id, limit=14)
 
     messages = [
-        {
-            "role": "system",
-            "content": (
-                f"You are {character['name']} {character['emoji']}. "
-                f"{character['prompt']}"
-            ),
-        },
+        {"role": "system", "content": SYSTEM_PROMPT},
         {
             "role": "system",
             "content": (
@@ -495,44 +346,6 @@ async def ping(ctx: commands.Context):
 
 
 @bot.command()
-async def characters(ctx: commands.Context):
-    chars = await list_characters()
-    if not chars:
-        await ctx.send("no characters yet 🥺")
-        return
-
-    default_id = await get_default_character_id()
-    lines = []
-    for c in chars:
-        mark = "⭐" if c["id"] == default_id else "•"
-        lines.append(f"{mark} `{c['id']}` — {c['emoji']} {c['name']}")
-    await ctx.send("available characters:\n" + "\n".join(lines))
-
-
-@bot.command(name="current")
-async def current_cmd(ctx: commands.Context):
-    channel_key = get_channel_key(ctx.message)
-    char = await get_channel_character(channel_key)
-    await ctx.send(f"this channel is using {char['emoji']} **{char['name']}** (`{char['id']}`)")
-
-
-@bot.command(name="character")
-async def character_cmd(ctx: commands.Context, char_id: str):
-    channel_key = get_channel_key(ctx.message)
-    char_id = normalize_id(char_id)
-    char = await fetch_character(char_id)
-
-    if not char:
-        chars = await list_characters()
-        ids = ", ".join(f"`{c['id']}`" for c in chars)
-        await ctx.send(f"unknown character 🥺 try one of these: {ids}")
-        return
-
-    await set_channel_character(channel_key, char_id)
-    await ctx.send(f"switched this channel to {char['emoji']} **{char['name']}** (`{char['id']}`)")
-
-
-@bot.command()
 async def remember(ctx: commands.Context, *, fact: str):
     await save_user_fact(str(ctx.author.id), fact)
     await ctx.send("saved that about you 🐾")
@@ -557,10 +370,10 @@ async def forgetme(ctx: commands.Context):
 
 @bot.command()
 async def reset(ctx: commands.Context):
-    channel_key = get_channel_key(ctx.message)
-    await delete_channel_memory(channel_key)
-    channel_mood.pop(channel_key, None)
-    await ctx.send("channel memory reset 🫧")
+    scope_key = get_scope_key(ctx.message)
+    await delete_scope_memory(scope_key)
+    channel_mood.pop(scope_key, None)
+    await ctx.send("memory reset 🫧")
 
 
 @bot.event
@@ -578,57 +391,52 @@ async def on_message(message: discord.Message):
         await bot.process_commands(message)
         return
 
-    channel_key = get_channel_key(message)
-    user_id = str(message.author.id)
-    display_name = get_display_name(message.author)
+    try:
+        scope_key = get_scope_key(message)
+        user_id = str(message.author.id)
+        display_name = get_display_name(message.author)
+        channel_key = scope_key
 
-    character = await get_channel_character(channel_key)
-    global_mood = await get_global_mood()
+        global_mood = await get_setting("global_mood", "neutral")
 
-    detected_mood = mood_from_text(content)
-    if detected_mood != "neutral":
-        channel_mood[channel_key] = detected_mood
-    else:
-        channel_mood.pop(channel_key, None)
+        detected_mood = mood_from_text(content)
+        if detected_mood != "neutral":
+            channel_mood[channel_key] = detected_mood
+        else:
+            channel_mood.pop(channel_key, None)
 
-    current_mood = channel_mood.get(channel_key, global_mood)
-    scope_id = f"{channel_key}:{character['id']}"
+        current_mood = channel_mood.get(channel_key, global_mood)
 
-    await upsert_user_profile(user_id, display_name)
-    await save_message(scope_id, channel_key, character["id"], user_id, "user", content)
+        await upsert_user_profile(user_id, display_name)
+        await save_message(scope_key, channel_key, user_id, "user", content)
 
-    async with message.channel.typing():
-        try:
+        async with message.channel.typing():
             context = await build_context(
-                scope_id=scope_id,
+                scope_id=scope_key,
                 channel_key=channel_key,
                 user_id=user_id,
                 display_name=display_name,
-                character=character,
                 current_mood=current_mood,
                 global_mood=global_mood,
             )
+
             reply = await ask_ai(context)
+            print("AI RAW:", reply)
+
+            if not reply:
+                await message.channel.send("mrrp… me got no reply from AI 🥺")
+                return
+
             reply = apply_mood_to_reply(reply, current_mood)
 
-            await save_message(scope_id, channel_key, character["id"], user_id, "assistant", reply)
+            await save_message(scope_key, channel_key, user_id, "bot", reply)
 
             for chunk in split_message(reply):
-                await message.channel.send(
-                    chunk,
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
+                await message.channel.send(chunk)
 
-            if message.guild is not None and random.random() < 0.20:
-                try:
-                    emoji = character["emoji"] if character["emoji"] else "🐾"
-                    await message.add_reaction(emoji if len(emoji) <= 2 else "🐾")
-                except Exception:
-                    pass
-
-        except Exception as e:
-            print("Groq/DB error:", repr(e))
-            await message.channel.send("oopsie, me hit an error 🥺")
+    except Exception as e:
+        print("ON_MESSAGE ERROR:", repr(e))
+        await message.channel.send("oopsie… internal error 🥺")
 
     await bot.process_commands(message)
 
