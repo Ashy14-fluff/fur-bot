@@ -169,6 +169,22 @@ async def set_setting(key: str, value: str) -> None:
         """, key, value)
 
 
+async def upsert_character(character_id: str, name: str, emoji: str, prompt: str) -> None:
+    await init_db()
+    assert db_pool is not None
+    character_id = normalize_id(character_id)
+    name = (name or character_id).strip()
+    emoji = (emoji or "🐾").strip()[:8]
+    prompt = (prompt or "").strip() or SYSTEM_FALLBACK
+
+    async with db_pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO characters (id, name, emoji, prompt)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, emoji = EXCLUDED.emoji, prompt = EXCLUDED.prompt;
+        """, character_id, name, emoji, prompt)
+
+
 async def ensure_defaults() -> None:
     await set_setting("global_mood", await get_setting("global_mood", "neutral"))
     await set_setting("default_character_id", await get_setting("default_character_id", "fur"))
@@ -223,34 +239,6 @@ def apply_mood_to_reply(reply: str, mood: str) -> str:
     if mood == "playful":
         return reply + "\n\n*wiggle wiggle* >w< 🐾"
     return reply
-
-
-async def upsert_character(character_id: str, name: str, emoji: str, prompt: str) -> None:
-    await init_db()
-    assert db_pool is not None
-    character_id = normalize_id(character_id)
-    name = (name or character_id).strip()
-    emoji = (emoji or "🐾").strip()[:8]
-    prompt = (prompt or "").strip() or SYSTEM_FALLBACK
-
-    async with db_pool.acquire() as conn:
-        await conn.execute("""
-            INSERT INTO characters (id, name, emoji, prompt)
-            VALUES ($1, $2, $3, $4)
-            ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, emoji = EXCLUDED.emoji, prompt = EXCLUDED.prompt;
-        """, character_id, name, emoji, prompt)
-
-
-async def list_characters() -> List[dict]:
-    await init_db()
-    assert db_pool is not None
-    async with db_pool.acquire() as conn:
-        rows = await conn.fetch("""
-            SELECT id, name, emoji, prompt
-            FROM characters
-            ORDER BY name ASC, id ASC;
-        """)
-    return [dict(row) for row in rows]
 
 
 async def fetch_character(character_id: str) -> Optional[dict]:
@@ -623,7 +611,7 @@ async def on_message(message: discord.Message):
             reply = await ask_ai(context)
             reply = apply_mood_to_reply(reply, current_mood)
 
-            await save_message(scope_id, channel_key, character["id"], "bot", "assistant", reply)
+            await save_message(scope_id, channel_key, character["id"], user_id, "assistant", reply)
 
             for chunk in split_message(reply):
                 await message.channel.send(
