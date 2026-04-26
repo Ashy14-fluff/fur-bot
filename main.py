@@ -3,6 +3,7 @@ import time
 import asyncio
 import random
 import threading
+from functools import wraps
 from datetime import datetime, timezone
 from typing import Optional, List, Dict
 
@@ -42,7 +43,7 @@ DEFAULT_CHARACTERS = [
         "but you must stay readable and helpful. "
         "You remember recent conversation context and persistent user facts. "
         "You are warm, playful, emotionally aware, and natural. "
-        "Do not be robotic.",
+        "Do not be robotic."
     ),
     (
         "shisha",
@@ -50,21 +51,21 @@ DEFAULT_CHARACTERS = [
         "💖",
         "You are Shisha 💖, a warm, affectionate, playful fluffy companion. "
         "You speak gently, lovingly, and in a cute readable style. "
-        "You can be a little goofy, emotionally expressive, and caring.",
+        "You can be a little goofy, emotionally expressive, and caring."
     ),
     (
         "serious",
         "Serious Bot",
         "🧠",
         "You are Serious Bot 🧠, calm, direct, precise, and helpful. "
-        "You avoid fluff unless the user asks for it.",
+        "You avoid fluff unless the user asks for it."
     ),
     (
         "gremlin",
         "Gremlin Bot",
         "😼",
         "You are Gremlin Bot 😼, chaotic, playful, mischievous, and funny. "
-        "You are still helpful, but with energetic gremlin vibes.",
+        "You are still helpful, but with energetic gremlin vibes."
     ),
 ]
 
@@ -119,7 +120,6 @@ LOGIN_HTML = """
 </body>
 </html>
 """
-
 
 DASHBOARD_HTML = """
 <!doctype html>
@@ -256,28 +256,24 @@ DASHBOARD_HTML = """
 </html>
 """
 
-
 def run_sync(coro, timeout: int = 30):
     start = time.time()
     while app_loop is None:
         if time.time() - start > timeout:
             raise RuntimeError("Bot loop is not ready yet.")
         time.sleep(0.1)
-
     future = asyncio.run_coroutine_threadsafe(coro, app_loop)
     return future.result(timeout=timeout)
 
-
 def login_required(view):
+    @wraps(view)
     def wrapped(*args, **kwargs):
         if not DASHBOARD_PASSWORD:
             return view(*args, **kwargs)
         if session.get("dashboard_authed"):
             return view(*args, **kwargs)
         return redirect(url_for("login"))
-    wrapped.__name__ = view.__name__
     return wrapped
-
 
 def normalize_id(text: str) -> str:
     allowed = []
@@ -286,11 +282,9 @@ def normalize_id(text: str) -> str:
             allowed.append(ch)
     return "".join(allowed)
 
-
 def normalize_mood(text: str) -> str:
     mood = (text or "neutral").strip().lower()
     return mood if mood in MOOD_OPTIONS else "neutral"
-
 
 async def init_db() -> None:
     global db_pool
@@ -304,59 +298,48 @@ async def init_db() -> None:
         db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
 
         async with db_pool.acquire() as conn:
-            await conn.execute(
-                """
+            await conn.execute("""
                 CREATE TABLE IF NOT EXISTS bot_settings (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
                 );
-                """
-            )
+            """)
 
-            await conn.execute(
-                """
+            await conn.execute("""
                 CREATE TABLE IF NOT EXISTS characters (
                     id TEXT PRIMARY KEY,
                     name TEXT NOT NULL,
                     emoji TEXT NOT NULL,
                     prompt TEXT NOT NULL
                 );
-                """
-            )
+            """)
 
-            await conn.execute(
-                """
+            await conn.execute("""
                 CREATE TABLE IF NOT EXISTS channel_characters (
                     channel_id TEXT PRIMARY KEY,
                     character_id TEXT NOT NULL
                 );
-                """
-            )
+            """)
 
-            await conn.execute(
-                """
+            await conn.execute("""
                 CREATE TABLE IF NOT EXISTS user_profiles (
                     user_id TEXT PRIMARY KEY,
                     display_name TEXT NOT NULL,
                     first_seen TIMESTAMPTZ NOT NULL,
                     last_seen TIMESTAMPTZ NOT NULL
                 );
-                """
-            )
+            """)
 
-            await conn.execute(
-                """
+            await conn.execute("""
                 CREATE TABLE IF NOT EXISTS user_facts (
                     id BIGSERIAL PRIMARY KEY,
                     user_id TEXT NOT NULL,
                     fact TEXT NOT NULL,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 );
-                """
-            )
+            """)
 
-            await conn.execute(
-                """
+            await conn.execute("""
                 CREATE TABLE IF NOT EXISTS messages (
                     id BIGSERIAL PRIMARY KEY,
                     scope_id TEXT NOT NULL,
@@ -367,126 +350,81 @@ async def init_db() -> None:
                     content TEXT NOT NULL,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 );
-                """
-            )
+            """)
 
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_scope_id_id ON messages(scope_id, id);")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_user_id_id ON messages(user_id, id);")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_user_facts_user_id_id ON user_facts(user_id, id);")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_channel_characters_channel_id ON channel_characters(channel_id);")
 
-            # Migration: add scope_id column to messages if it was created by an older schema
-            col_exists = await conn.fetchval(
-                """
-                SELECT COUNT(*) FROM information_schema.columns
-                WHERE table_name = 'messages' AND column_name = 'scope_id';
-                """
-            )
-            if not col_exists:
-                await conn.execute("ALTER TABLE messages ADD COLUMN scope_id TEXT NOT NULL DEFAULT '';")
-                await conn.execute("UPDATE messages SET scope_id = 'ch_' || channel_id WHERE scope_id = '';")
-                await conn.execute("ALTER TABLE messages ALTER COLUMN scope_id DROP DEFAULT;")
-
-
 async def get_setting(key: str, default: str) -> str:
     await init_db()
     assert db_pool is not None
-
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow("SELECT value FROM bot_settings WHERE key = $1;", key)
-        if row is None:
-            return default
-        return row["value"]
-
+        return row["value"] if row else default
 
 async def set_setting(key: str, value: str) -> None:
     await init_db()
     assert db_pool is not None
-
     async with db_pool.acquire() as conn:
-        await conn.execute(
-            """
+        await conn.execute("""
             INSERT INTO bot_settings (key, value)
             VALUES ($1, $2)
             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
-            """,
-            key,
-            value,
-        )
-
+        """, key, value)
 
 async def upsert_character(character_id: str, name: str, emoji: str, prompt: str) -> None:
     await init_db()
     assert db_pool is not None
-
     character_id = normalize_id(character_id)
     name = (name or character_id).strip()
     emoji = (emoji or "🐾").strip()[:8]
     prompt = (prompt or "").strip() or DEFAULT_CHARACTERS[0][3]
 
     async with db_pool.acquire() as conn:
-        await conn.execute(
-            """
+        await conn.execute("""
             INSERT INTO characters (id, name, emoji, prompt)
             VALUES ($1, $2, $3, $4)
             ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, emoji = EXCLUDED.emoji, prompt = EXCLUDED.prompt;
-            """,
-            character_id,
-            name,
-            emoji,
-            prompt,
-        )
-
+        """, character_id, name, emoji, prompt)
 
 async def ensure_defaults() -> None:
     await set_setting("global_mood", await get_setting("global_mood", "neutral"))
     await set_setting("default_character_id", await get_setting("default_character_id", "fur"))
-
     for cid, name, emoji, prompt in DEFAULT_CHARACTERS:
         await upsert_character(cid, name, emoji, prompt)
-
 
 async def list_characters() -> List[dict]:
     await init_db()
     assert db_pool is not None
-
     async with db_pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
+        rows = await conn.fetch("""
             SELECT id, name, emoji, prompt
             FROM characters
             ORDER BY name ASC, id ASC;
-            """
-        )
+        """)
     return [dict(row) for row in rows]
-
 
 async def fetch_character(character_id: str) -> Optional[dict]:
     await init_db()
     assert db_pool is not None
-
     character_id = normalize_id(character_id)
     async with db_pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
+        row = await conn.fetchrow("""
             SELECT id, name, emoji, prompt
             FROM characters
             WHERE id = $1;
-            """,
-            character_id,
-        )
+        """, character_id)
     return dict(row) if row else None
-
 
 async def get_character(character_id: str) -> dict:
     row = await fetch_character(character_id)
     if row:
         return row
-
     fallback = await fetch_character("fur")
     if fallback:
         return fallback
-
     return {
         "id": "fur",
         "name": "Fur Bot",
@@ -494,165 +432,109 @@ async def get_character(character_id: str) -> dict:
         "prompt": DEFAULT_CHARACTERS[0][3],
     }
 
-
 async def get_default_character_id() -> str:
     return normalize_id(await get_setting("default_character_id", "fur")) or "fur"
-
 
 async def get_global_mood() -> str:
     return normalize_mood(await get_setting("global_mood", "neutral"))
 
-
 async def set_channel_character(channel_id: str, character_id: str) -> None:
     await init_db()
     assert db_pool is not None
-
     character_id = normalize_id(character_id)
     async with db_pool.acquire() as conn:
-        await conn.execute(
-            """
+        await conn.execute("""
             INSERT INTO channel_characters (channel_id, character_id)
             VALUES ($1, $2)
             ON CONFLICT (channel_id) DO UPDATE SET character_id = EXCLUDED.character_id;
-            """,
-            channel_id,
-            character_id,
-        )
-
+        """, channel_id, character_id)
 
 async def get_channel_character(channel_id: str) -> dict:
     await init_db()
     assert db_pool is not None
-
     async with db_pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
+        row = await conn.fetchrow("""
             SELECT c.id, c.name, c.emoji, c.prompt
             FROM channel_characters cc
             JOIN characters c ON c.id = cc.character_id
             WHERE cc.channel_id = $1;
-            """,
-            channel_id,
-        )
-
+        """, channel_id)
     if row:
         return dict(row)
-
-    default_id = await get_default_character_id()
-    return await get_character(default_id)
-
+    return await get_character(await get_default_character_id())
 
 async def save_user_fact(user_id: str, fact: str) -> None:
     await init_db()
     assert db_pool is not None
-
     async with db_pool.acquire() as conn:
-        await conn.execute(
-            """
+        await conn.execute("""
             INSERT INTO user_facts (user_id, fact)
             VALUES ($1, $2);
-            """,
-            user_id,
-            fact[:1000],
-        )
-
+        """, user_id, fact[:1000])
 
 async def load_user_facts(user_id: str, limit: int = 8) -> List[str]:
     await init_db()
     assert db_pool is not None
-
     async with db_pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
+        rows = await conn.fetch("""
             SELECT fact
             FROM user_facts
             WHERE user_id = $1
             ORDER BY id DESC
             LIMIT $2;
-            """,
-            user_id,
-            limit,
-        )
-
-    rows = list(reversed(rows))
-    return [row["fact"] for row in rows]
-
+        """, user_id, limit)
+    return [row["fact"] for row in reversed(rows)]
 
 async def get_user_profile(user_id: str):
     await init_db()
     assert db_pool is not None
-
     async with db_pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
+        row = await conn.fetchrow("""
             SELECT user_id, display_name, first_seen, last_seen
             FROM user_profiles
             WHERE user_id = $1;
-            """,
-            user_id,
-        )
+        """, user_id)
     return row
-
 
 async def upsert_user_profile(user_id: str, display_name: str) -> None:
     await init_db()
     assert db_pool is not None
-
     now = datetime.now(timezone.utc)
     async with db_pool.acquire() as conn:
-        await conn.execute(
-            """
+        await conn.execute("""
             INSERT INTO user_profiles (user_id, display_name, first_seen, last_seen)
             VALUES ($1, $2, $3, $4)
             ON CONFLICT (user_id)
             DO UPDATE SET display_name = EXCLUDED.display_name,
                           last_seen = EXCLUDED.last_seen;
-            """,
-            user_id,
-            display_name,
-            now,
-            now,
-        )
-
+        """, user_id, display_name, now, now)
 
 async def delete_user_memory(user_id: str) -> None:
     await init_db()
     assert db_pool is not None
-
     async with db_pool.acquire() as conn:
         await conn.execute("DELETE FROM messages WHERE user_id = $1;", user_id)
         await conn.execute("DELETE FROM user_facts WHERE user_id = $1;", user_id)
         await conn.execute("DELETE FROM user_profiles WHERE user_id = $1;", user_id)
 
-
 async def delete_channel_memory(channel_id: str) -> None:
     await init_db()
     assert db_pool is not None
-
     async with db_pool.acquire() as conn:
         await conn.execute("DELETE FROM messages WHERE channel_id = $1;", channel_id)
-
 
 async def load_scope_history(scope_id: str, limit: int = 14) -> List[dict]:
     await init_db()
     assert db_pool is not None
-
     async with db_pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
+        rows = await conn.fetch("""
             SELECT role, content
             FROM messages
             WHERE scope_id = $1
             ORDER BY id DESC
             LIMIT $2;
-            """,
-            scope_id,
-            limit,
-        )
-
-    rows = list(reversed(rows))
-    return [{"role": row["role"], "content": row["content"]} for row in rows]
-
+        """, scope_id, limit)
+    return [{"role": row["role"], "content": row["content"]} for row in reversed(rows)]
 
 async def save_message(
     scope_id: str,
@@ -664,21 +546,11 @@ async def save_message(
 ) -> None:
     await init_db()
     assert db_pool is not None
-
     async with db_pool.acquire() as conn:
-        await conn.execute(
-            """
+        await conn.execute("""
             INSERT INTO messages (scope_id, channel_id, character_id, user_id, role, content)
             VALUES ($1, $2, $3, $4, $5, $6);
-            """,
-            scope_id,
-            channel_id,
-            character_id,
-            user_id,
-            role,
-            content[:4000],
-        )
-
+        """, scope_id, channel_id, character_id, user_id, role, content[:4000])
 
 def split_message(text: str, limit: int = 1900):
     text = text or ""
@@ -686,16 +558,13 @@ def split_message(text: str, limit: int = 1900):
         return ["mrrp... empty reply 🥺"]
     return [text[i:i + limit] for i in range(0, len(text), limit)]
 
-
 def get_display_name(author: discord.abc.User) -> str:
     return getattr(author, "display_name", None) or getattr(author, "global_name", None) or author.name
-
 
 def get_channel_key(message: discord.Message) -> str:
     if message.guild is None:
         return f"dm_{message.author.id}"
     return f"ch_{message.channel.id}"
-
 
 def mood_from_text(text: str) -> str:
     t = text.lower()
@@ -709,7 +578,6 @@ def mood_from_text(text: str) -> str:
         return "playful"
     return "neutral"
 
-
 def apply_mood_to_reply(reply: str, mood: str) -> str:
     if mood == "soft":
         return "mrrp… me here with yuw 🥺🐾\n\n" + reply
@@ -720,7 +588,6 @@ def apply_mood_to_reply(reply: str, mood: str) -> str:
     if mood == "playful":
         return reply + "\n\n*wiggle wiggle* >w< 🐾"
     return reply
-
 
 async def build_context(
     scope_id: str,
@@ -780,7 +647,6 @@ async def build_context(
     messages.extend(history)
     return messages
 
-
 async def ask_ai(messages: List[dict]) -> str:
     def call_groq():
         completion = groq_client.chat.completions.create(
@@ -789,14 +655,11 @@ async def ask_ai(messages: List[dict]) -> str:
             temperature=0.9,
         )
         return completion.choices[0].message.content or ""
-
     return await asyncio.to_thread(call_groq)
-
 
 @app.route("/health")
 def health():
     return "ok", 200
-
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
@@ -814,12 +677,10 @@ def login():
 
     return render_template_string(LOGIN_HTML, error=error, password_needed=True)
 
-
 @app.route("/logout")
 def logout():
     session.pop("dashboard_authed", None)
     return redirect(url_for("login"))
-
 
 @app.route("/", methods=["GET", "POST"])
 @login_required
@@ -833,12 +694,10 @@ def dashboard():
         if action == "save_global":
             new_global_mood = normalize_mood(request.form.get("global_mood", "neutral"))
             new_default_id = normalize_id(request.form.get("default_character_id", "fur")) or "fur"
-
             chars = run_sync(list_characters())
             valid_ids = {c["id"] for c in chars}
             if new_default_id not in valid_ids:
                 new_default_id = "fur"
-
             run_sync(set_setting("global_mood", new_global_mood))
             run_sync(set_setting("default_character_id", new_default_id))
             return redirect(url_for("dashboard", char=request.args.get("char", new_default_id)))
@@ -856,17 +715,14 @@ def dashboard():
             new_name = request.form.get("new_name", "").strip()
             new_emoji = request.form.get("new_emoji", "🐾").strip()[:8]
             new_prompt = request.form.get("new_prompt", "").strip()
-
             if new_id:
                 run_sync(upsert_character(new_id, new_name or new_id, new_emoji or "🐾", new_prompt or DEFAULT_CHARACTERS[0][3]))
                 return redirect(url_for("dashboard", char=new_id))
-
             return redirect(url_for("dashboard"))
 
     characters = run_sync(list_characters())
     global_mood = run_sync(get_global_mood())
     default_character_id = run_sync(get_default_character_id())
-
     selected_char_id = normalize_id(request.args.get("char", default_character_id)) or default_character_id
     selected_char = run_sync(get_character(selected_char_id))
 
@@ -879,11 +735,9 @@ def dashboard():
         mood_options=MOOD_OPTIONS,
     )
 
-
 def run_dashboard():
     port = int(os.getenv("PORT", "8080"))
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False, threaded=True)
-
 
 @bot.event
 async def on_ready():
@@ -894,11 +748,9 @@ async def on_ready():
     print(f"Logged in as {bot.user}")
     await bot.change_presence(activity=discord.Game(name="fluffy chats 🐾"))
 
-
 @bot.command()
 async def ping(ctx: commands.Context):
     await ctx.send("pong 🐾")
-
 
 @bot.command()
 async def characters(ctx: commands.Context):
@@ -906,7 +758,6 @@ async def characters(ctx: commands.Context):
     if not chars:
         await ctx.send("no characters yet 🥺")
         return
-
     default_id = await get_default_character_id()
     lines = []
     for c in chars:
@@ -914,13 +765,11 @@ async def characters(ctx: commands.Context):
         lines.append(f"{mark} `{c['id']}` — {c['emoji']} {c['name']}")
     await ctx.send("available characters:\n" + "\n".join(lines))
 
-
 @bot.command(name="current")
 async def current_cmd(ctx: commands.Context):
     channel_key = get_channel_key(ctx.message)
     char = await get_channel_character(channel_key)
     await ctx.send(f"this channel is using {char['emoji']} **{char['name']}** (`{char['id']}`)")
-
 
 @bot.command(name="character")
 async def character_cmd(ctx: commands.Context, char_id: str):
@@ -937,12 +786,10 @@ async def character_cmd(ctx: commands.Context, char_id: str):
     await set_channel_character(channel_key, char_id)
     await ctx.send(f"switched this channel to {char['emoji']} **{char['name']}** (`{char['id']}`)")
 
-
 @bot.command()
 async def remember(ctx: commands.Context, *, fact: str):
     await save_user_fact(str(ctx.author.id), fact)
     await ctx.send("saved that about you 🐾")
-
 
 @bot.command()
 async def facts(ctx: commands.Context):
@@ -950,16 +797,13 @@ async def facts(ctx: commands.Context):
     if not facts_list:
         await ctx.send("me don’t know any facts about you yet 🥺")
         return
-
     text = "\n".join(f"• {f}" for f in facts_list)
     await ctx.send(f"what me remember about you:\n{text}")
-
 
 @bot.command()
 async def forgetme(ctx: commands.Context):
     await delete_user_memory(str(ctx.author.id))
     await ctx.send("forgot your stored memory here 🫧")
-
 
 @bot.command()
 async def reset(ctx: commands.Context):
@@ -967,7 +811,6 @@ async def reset(ctx: commands.Context):
     await delete_channel_memory(channel_key)
     channel_mood.pop(channel_key, None)
     await ctx.send("channel memory reset 🫧")
-
 
 @bot.event
 async def on_message(message: discord.Message):
@@ -1014,7 +857,6 @@ async def on_message(message: discord.Message):
                 current_mood=current_mood,
                 global_mood=global_mood,
             )
-
             reply = await ask_ai(context)
             reply = apply_mood_to_reply(reply, current_mood)
 
@@ -1038,7 +880,6 @@ async def on_message(message: discord.Message):
             await message.channel.send("oopsie, me hit an error 🥺")
 
     await bot.process_commands(message)
-
 
 threading.Thread(target=run_dashboard, daemon=True).start()
 
