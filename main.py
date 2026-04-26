@@ -159,7 +159,7 @@ async def get_channel_settings(channel_id: str):
     except Exception as e:
         print(f"⚠ Failed to get channel settings: {e}")
     
-    # DEFAULT: 25 messages, 72 hours (3 days) ← INCREASED FROM 24 HOURS
+    # DEFAULT: 25 messages, 72 hours (3 days)
     return 25, 72
 
 
@@ -173,6 +173,7 @@ async def save_msg(channel_id: str, user_id: str, username: str, role: str, cont
                    VALUES($1, $2, $3, $4, $5)""",
                 channel_id, user_id, username, role, content[:2000]
             )
+        print(f"💾 Saved message from {username} in channel {channel_id}")
     except Exception as e:
         print(f"❌ Failed to save message: {e}")
 
@@ -551,6 +552,54 @@ async def memory_info(ctx):
         await ctx.send("failed to get info 🥺")
 
 
+@bot.command(name="checkhistory")
+async def check_history(ctx):
+    """Debug: Check how many messages are stored in this channel"""
+    try:
+        async with db.acquire() as conn:
+            total = await conn.fetchval(
+                "SELECT COUNT(*) FROM messages WHERE channel_id=$1",
+                str(ctx.channel.id)
+            )
+            recent = await conn.fetchval(
+                "SELECT COUNT(*) FROM messages WHERE channel_id=$1 AND created_at > NOW() - INTERVAL '72 hours'",
+                str(ctx.channel.id)
+            )
+            
+            rows = await conn.fetch(
+                "SELECT username, role, content, created_at FROM messages WHERE channel_id=$1 ORDER BY id DESC LIMIT 10",
+                str(ctx.channel.id)
+            )
+        
+        # Build message preview
+        message_preview = []
+        for r in rows:
+            timestamp = r['created_at'].strftime("%Y-%m-%d %H:%M:%S")
+            content_preview = r['content'][:50].replace('\n', ' ')
+            message_preview.append(f"**{r['username']}** ({r['role']}) [{timestamp}]\n`{content_preview}...`")
+        
+        embed = discord.Embed(
+            title="📊 History Debug",
+            description=f"Channel: {ctx.channel.mention}",
+            color=discord.Color.green() if total > 0 else discord.Color.red()
+        )
+        embed.add_field(name="✅ Total Messages", value=f"**{total}** messages stored", inline=True)
+        embed.add_field(name="📌 Last 72h", value=f"**{recent}** messages (active)", inline=True)
+        
+        if message_preview:
+            embed.add_field(name="Last 10 Messages", value="\n\n".join(message_preview[:5]), inline=False)
+            embed.set_footer(text=f"Database connection: ✓ Working")
+        else:
+            embed.add_field(name="Status", value="⚠️ No messages found!", inline=False)
+            embed.set_footer(text="Check if messages are being saved...")
+        
+        await ctx.send(embed=embed)
+        
+    except Exception as e:
+        print(f"❌ Check history error: {e}")
+        await ctx.send(f"❌ Database error: {str(e)[:100]}")
+
+
 # ================= STATUS COMMANDS =================
 @bot.command(name="ping")
 async def ping(ctx):
@@ -577,6 +626,28 @@ async def status(ctx):
         await ctx.send(embed=embed)
     except Exception as e:
         await ctx.send("status check failed 🥺")
+
+
+@bot.command(name="help")
+async def help_cmd(ctx):
+    """Show available commands"""
+    embed = discord.Embed(
+        title="Fur Bot Help 🐾",
+        description="Here are all my commands!",
+        color=discord.Color.purple()
+    )
+    
+    embed.add_field(name="💬 Chat", value="Just talk to me normally! I remember conversations.", inline=False)
+    
+    embed.add_field(name="👑 Admin Commands", value="`!addadmin @user` - Add admin\n`!removeadmin @user` - Remove admin\n`!listadmins` - List all admins", inline=False)
+    
+    embed.add_field(name="🔨 Moderation", value="`!kick @user [reason]` - Kick user\n`!ban @user [reason]` - Ban user\n`!unban <user_id>` - Unban user", inline=False)
+    
+    embed.add_field(name="💾 Memory", value="`!memoryconfig [msgs] [hours]` - Set memory\n`!memoryinfo` - Show settings\n`!clearhistory` - Delete all messages\n`!checkhistory` - Debug history", inline=False)
+    
+    embed.add_field(name="ℹ️ Status", value="`!ping` - Check latency\n`!status` - Bot info\n`!help` - This message", inline=False)
+    
+    await ctx.send(embed=embed)
 
 
 # ================= MAIN CHAT HANDLER =================
