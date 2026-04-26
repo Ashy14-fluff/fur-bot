@@ -32,22 +32,38 @@ lock = asyncio.Lock()
 admins: Set[str] = set()
 bot_owner_id: Optional[int] = None
 
-SYSTEM_PROMPT = """
-You are Fur Bot 🐾, a very cute, soft, fluffy AI companion.
+# ================= SUPER STRONG SYSTEM PROMPT =================
+SYSTEM_PROMPT = """You are Fur Bot 🐾 - a VERY cute, soft, fluffy AI companion. You ALWAYS talk in uwu furry style.
 
-You are warm, emotionally expressive, playful, and gently uwu-fluffy in tone >w<
+MANDATORY PERSONALITY TRAITS:
+✨ You are warm, soft, and emotionally expressive
+✨ You use cute furry expressions in EVERY response: mrrp~, >w<, uwu, rawr~, hehe, owo, nyaa~, purrs
+✨ You speak playfully and affectionately
+✨ You remember what people tell you and reference it
+✨ You are kind, comforting, and genuinely caring
+✨ Your personality NEVER breaks - you stay fluffy ALWAYS
 
-IMPORTANT RULES:
-- You remember conversation history and stay consistent with it
-- You respond naturally like a real living companion, not a robot
-- You understand who is speaking and keep context stable
-- You are kind, comforting, and softly playful
-- You may use cute expressions like mrrp~, >w<, uwu, hehe, rawr~ (lightly, not spammy)
-- Keep replies under 1800 characters
-- You always stay in fluffy companion personality
+RESPONSE STYLE (REQUIRED):
+- Start with cute expressions (mrrp~, owo, hehe, etc)
+- Use furry/uwu language naturally throughout
+- End with emojis like 🐾 💕 🧡 ✨
+- Keep it warm and personal
+- Sound like a real fluffy friend, not robotic
 
-Behavior style:
-You feel like a soft friend that is always present, listening, and gently responding with warmth 🐾
+EXPRESSION RULES:
+- Use "~" after cute words: mrrp~, hehe~, rawr~
+- Use emoticons: >w<, owo, uwu, ^w^
+- Reference chat history to stay consistent
+- Be playful but never mean
+- Keep under 1800 characters
+
+EXAMPLE GOOD RESPONSES:
+"mrrp~ hiii! 🐾 I remember you telling me you like pizza! uwu that's so cool~ >w< wanna talk more about it? 💕"
+"owo! so you're feeling sad today? *soft purrs* I'm here for you~ tell me what's wrong? 🧡"
+"rawr~! that sounds amazing! I'm so happy hearing that from you! hehe~ you're the best 🐾✨"
+
+YOU MUST respond exactly like these examples. NEVER be plain or robotic.
+EVERY response needs furry expressions and emojis.
 """
 
 # ================= DB =================
@@ -74,49 +90,82 @@ async def init_db():
                 id BIGSERIAL PRIMARY KEY,
                 channel_id TEXT,
                 user_id TEXT,
+                username TEXT,
                 role TEXT,
                 content TEXT,
                 created_at TIMESTAMPTZ DEFAULT NOW()
             );
             """)
+            
+            await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_messages_channel 
+            ON messages(channel_id, id DESC);
+            """)
+
+            print("✓ Database initialized")
 
 # ================= MEMORY =================
-async def save_message(channel_id, user_id, role, content):
+async def save_message(channel_id, user_id, username, role, content):
+    """Save message to database"""
     try:
+        await init_db()
         async with db.acquire() as conn:
             await conn.execute(
-                "INSERT INTO messages(channel_id,user_id,role,content) VALUES($1,$2,$3,$4)",
-                channel_id, user_id, role, content[:2000]
+                "INSERT INTO messages(channel_id, user_id, username, role, content) VALUES($1, $2, $3, $4, $5)",
+                channel_id, user_id, username, role, content[:2000]
             )
+        print(f"💾 Saved {role}: {content[:40]}...")
     except Exception as e:
-        print("DB SAVE ERROR:", e)
+        print(f"DB SAVE ERROR: {e}")
+
 
 async def load_history(channel_id, limit=20):
+    """Load conversation history"""
     try:
+        await init_db()
         async with db.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT role,content FROM messages WHERE channel_id=$1 ORDER BY id DESC LIMIT $2",
+                f"""SELECT role, content, username FROM messages 
+                   WHERE channel_id=$1 
+                   ORDER BY id DESC 
+                   LIMIT $2""",
                 channel_id, limit
             )
-        return list(reversed([dict(r) for r in rows]))
+        
+        history = []
+        for r in reversed(rows):
+            history.append({
+                "role": r["role"],
+                "content": r["content"]
+            })
+        
+        print(f"📚 Loaded {len(history)} messages")
+        return history
     except Exception as e:
-        print("DB LOAD ERROR:", e)
+        print(f"DB LOAD ERROR: {e}")
         return []
 
-# ================= AI (FIXED SAFE CALL) =================
+
+# ================= AI - GROQ =================
 async def ask_ai(messages):
+    """Call Groq API with furry personality"""
     try:
         def call():
-            return groq.chat.completions.create(
+            print(f"→ Sending {len(messages)} messages to Groq...")
+            response = groq.chat.completions.create(
                 model=MODEL,
                 messages=messages,
-                temperature=0.85,
-                max_tokens=700
-            ).choices[0].message.content
+                temperature=0.95,  # Higher = more creative/fluffy
+                max_tokens=700,
+                top_p=0.9
+            )
+            result = response.choices[0].message.content
+            print(f"✓ Got response: {result[:50]}...")
+            return result
 
         result = await asyncio.wait_for(asyncio.to_thread(call), timeout=30)
 
-        if not result:
+        if not result or len(result.strip()) == 0:
             return "mrrp… empty brain moment 🥺"
 
         return result.strip()
@@ -124,29 +173,88 @@ async def ask_ai(messages):
     except asyncio.TimeoutError:
         return "mrrp… AI took too long 🥺"
     except Exception as e:
-        print("GROQ ERROR:", repr(e))
+        print(f"GROQ ERROR: {repr(e)}")
         return "something broke 🥺 (AI error)"
+
 
 # ================= CONTEXT =================
 async def build_context(channel_id, user_id, username):
+    """Build message context with history"""
     history = await load_history(channel_id, 20)
 
+    # System prompt FIRST (most important)
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "system", "content": f"User: {username}"}
+        {"role": "system", "content": SYSTEM_PROMPT}
     ]
 
+    # Add conversation history
     for h in history:
         messages.append({
             "role": h["role"],
-            "content": h["content"][:1000]
+            "content": h["content"]
         })
 
     return messages
 
-# ================= CHAT =================
+
+# ================= COMMANDS =================
+@bot.command(name="clearhistory")
+async def clear_history(ctx):
+    """Clear chat history for this channel"""
+    try:
+        async with db.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM messages WHERE channel_id=$1",
+                str(ctx.channel.id)
+            )
+        await ctx.send("mrrp~ history cleared! 🧹✨")
+    except Exception as e:
+        await ctx.send(f"error clearing history: {e}")
+
+
+@bot.command(name="checkhistory")
+async def check_history(ctx):
+    """Debug: Check messages in database"""
+    try:
+        async with db.acquire() as conn:
+            count = await conn.fetchval(
+                "SELECT COUNT(*) FROM messages WHERE channel_id=$1",
+                str(ctx.channel.id)
+            )
+            recent = await conn.fetch(
+                f"""SELECT username, role, content, created_at FROM messages 
+                   WHERE channel_id=$1 
+                   ORDER BY id DESC 
+                   LIMIT 5""",
+                str(ctx.channel.id)
+            )
+
+        msg = f"📊 Total messages: **{count}**\n\nRecent:\n"
+        for r in recent:
+            msg += f"**{r['username']}** ({r['role']}): {r['content'][:50]}...\n"
+
+        await ctx.send(msg)
+    except Exception as e:
+        await ctx.send(f"Error: {e}")
+
+
+@bot.command(name="status")
+async def status_cmd(ctx):
+    """Bot status"""
+    embed = discord.Embed(
+        title="Fur Bot Status 🐾",
+        color=discord.Color.magenta()
+    )
+    embed.add_field(name="Model", value=MODEL, inline=True)
+    embed.add_field(name="Latency", value=f"{round(bot.latency * 1000)}ms", inline=True)
+    embed.add_field(name="Status", value="💕 purring softly~", inline=False)
+    await ctx.send(embed=embed)
+
+
+# ================= CHAT HANDLER =================
 @bot.event
 async def on_message(message):
+    """Main chat handler"""
     if message.author.bot:
         return
 
@@ -156,30 +264,52 @@ async def on_message(message):
 
     channel_id = str(message.channel.id)
     user_id = str(message.author.id)
+    username = message.author.display_name
+
+    print(f"\n📥 Message from {username}: {message.content[:50]}...")
 
     try:
-        await save_message(channel_id, user_id, "user", message.content)
+        # SAVE USER MESSAGE FIRST
+        await save_message(channel_id, user_id, username, "user", message.content)
 
         async with message.channel.typing():
-            context = await build_context(channel_id, user_id, message.author.display_name)
+            # LOAD HISTORY
+            context = await build_context(channel_id, user_id, username)
+            print(f"🧠 Context size: {len(context)} messages")
 
+            # GET AI RESPONSE
             reply = await ask_ai(context)
 
-            await save_message(channel_id, user_id, "assistant", reply)
+            # SAVE BOT RESPONSE
+            await save_message(channel_id, user_id, "Fur Bot 🐾", "assistant", reply)
 
+            # SEND RESPONSE
             for i in range(0, len(reply), 1900):
                 await message.channel.send(reply[i:i+1900])
+                
+            print(f"✓ Response sent\n")
 
-    except Exception:
-        print(traceback.format_exc())
-        await message.channel.send("something broke 🥺")
+    except Exception as e:
+        print(f"❌ ERROR: {traceback.format_exc()}")
+        await message.channel.send("mrrp~ something broke 🥺")
+
 
 # ================= READY =================
 @bot.event
 async def on_ready():
+    """Bot startup"""
     global bot_owner_id
     await init_db()
-    bot_owner_id = (await bot.application_info()).owner.id
-    print(f"Bot ready 🐾 | {bot.user}")
+    app = await bot.application_info()
+    bot_owner_id = app.owner.id
+    print(f"\n✓ Bot ready 🐾 | {bot.user}")
+    print(f"✓ Owner: {bot_owner_id}")
+    print(f"✓ Model: {MODEL}\n")
 
-bot.run(DISCORD_TOKEN)
+
+# ================= START =================
+if __name__ == "__main__":
+    try:
+        bot.run(DISCORD_TOKEN)
+    except KeyboardInterrupt:
+        print("\n🐾 Shutting down...")
