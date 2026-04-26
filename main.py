@@ -126,7 +126,7 @@ async def save_message(channel_id: str, user_id: str, role: str, content: str) -
         )
 
 
-async def load_channel_history(channel_id: str, limit: int = 25) -> List[dict]:
+async def load_channel_history(channel_id: str, limit: int = 15) -> List[dict]:
     await init_db()
     assert db_pool is not None
     async with db_pool.acquire() as conn:
@@ -194,7 +194,7 @@ def split_message(text: str, limit: int = 1900) -> List[str]:
 async def build_context(channel_id: str, user_id: str, display_name: str) -> List[dict]:
     profile = await get_user_profile(user_id)
     facts = await load_user_facts(user_id, limit=8)
-    channel_history = await load_channel_history(channel_id, limit=25)
+    channel_history = await load_channel_history(channel_id, limit=15)
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -209,7 +209,6 @@ async def build_context(channel_id: str, user_id: str, display_name: str) -> Lis
     if facts:
         messages.append({"role": "system", "content": "Persistent facts about current user:\n- " + "\n- ".join(facts)})
 
-    # Add full history so bot knows da context
     if channel_history:
         history_text = "Previous messages in this channel:\n"
         for msg in channel_history:
@@ -226,7 +225,7 @@ async def ask_ai(messages: List[dict]) -> str:
             model=GROQ_MODEL,
             messages=messages,
             temperature=0.85 + (lewd_level * 0.05),
-            max_tokens=950,
+            max_tokens=800,
         )
         return completion.choices[0].message.content or "mrrp... me brain went all floofy 🥺"
     return await asyncio.to_thread(call_groq)
@@ -444,9 +443,10 @@ async def on_message(message: discord.Message):
 
             if random.random() < 0.25: await message.add_reaction("🐾")
             if lewd_level >= 2 and random.random() < 0.18: await message.add_reaction("💦")
+
         except Exception as e:
             print("Groq/DB error:", repr(e))
-            await message.channel.send("oopsie, me hit an error 🥺")
+            await message.channel.send("mrrp... me got too excited an' mah bwain got too fuww of fwuff... sowwy 🥺 me twy again soon~")
 
 
 bot.run(DISCORD_TOKEN)
