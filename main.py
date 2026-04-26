@@ -1,6 +1,7 @@
 import os
 import asyncio
 import traceback
+import random
 from typing import Optional, Set
 
 import asyncpg
@@ -32,6 +33,21 @@ lock = asyncio.Lock()
 admins: Set[str] = set()
 bot_owner_id: Optional[int] = None
 
+# ================= MOOD SYSTEM =================
+bot_mood = "neutral"
+last_message_time = asyncio.get_event_loop().time()
+
+def update_mood():
+    global bot_mood
+    r = random.random()
+
+    if r < 0.4:
+        bot_mood = "happy"
+    elif r < 0.7:
+        bot_mood = "neutral"
+    else:
+        bot_mood = "sleepy"
+
 # ================= SYSTEM PROMPT =================
 SYSTEM_PROMPT = """
 You are Fur Bot 🐾, a soft fluffy furry companion.
@@ -45,6 +61,7 @@ Rules:
 - Stay in character ALWAYS
 - Remember conversation context
 - Keep replies under 1800 characters
+- Show emotions based on mood
 """
 
 # ================= DB =================
@@ -122,7 +139,7 @@ async def ask_ai(messages):
             return groq.chat.completions.create(
                 model=MODEL,
                 messages=messages,
-                temperature=0.9,
+                temperature=0.95,
                 max_tokens=700
             ).choices[0].message.content
 
@@ -134,15 +151,75 @@ async def ask_ai(messages):
 
 # ================= CONTEXT =================
 async def build_context(channel_id, user_id, username):
+    update_mood()
+
     history = await load_history(channel_id, user_id)
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": f"Mood: {bot_mood}"},
         {"role": "system", "content": f"Talking to {username}"}
     ]
 
     messages.extend(history)
     return messages
+
+# ================= AUTO TALK LOOP =================
+async def auto_talk_loop():
+    await bot.wait_until_ready()
+    global last_message_time
+
+    while not bot.is_closed():
+        await asyncio.sleep(20)
+
+        idle = asyncio.get_event_loop().time() - last_message_time
+
+        if idle > 120:  # 2 minutes silence
+            try:
+                channel = discord.utils.get(bot.get_all_channels())
+                if channel:
+                    msg = await ask_ai([
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": "say something cute because chat is quiet"}
+                    ])
+                    await channel.send(msg)
+                    last_message_time = asyncio.get_event_loop().time()
+            except:
+                pass
+
+# ================= CHAT =================
+@bot.event
+async def on_message(message):
+    global last_message_time
+
+    if message.author.bot:
+        return
+
+    if message.content.startswith("!"):
+        await bot.process_commands(message)
+        return
+
+    last_message_time = asyncio.get_event_loop().time()
+
+    channel_id = str(message.channel.id)
+    user_id = str(message.author.id)
+    username = message.author.display_name
+
+    try:
+        await save_message(channel_id, user_id, "user", message.content)
+
+        async with message.channel.typing():
+            context = await build_context(channel_id, user_id, username)
+            reply = await ask_ai(context)
+
+            await save_message(channel_id, user_id, "assistant", reply)
+
+            for i in range(0, len(reply), 1900):
+                await message.channel.send(reply[i:i+1900])
+
+    except Exception:
+        print(traceback.format_exc())
+        await message.channel.send("mrrp~ something broke 🥺")
 
 # ================= ADMIN COMMANDS =================
 @bot.command()
@@ -170,46 +247,17 @@ async def deladmin(ctx, member: discord.Member):
     admins.discard(str(member.id))
     await ctx.send("admin removed 🐾")
 
-# ================= CHAT (FIXED — THIS WAS YOUR BUG) =================
-@bot.event
-async def on_message(message):
-    if message.author.bot:
-        return
-
-    # IMPORTANT FIX: do NOT block messages anymore
-    # THIS was why your bot was silent before
-
-    if message.content.startswith("!"):
-        await bot.process_commands(message)
-        return
-
-    channel_id = str(message.channel.id)
-    user_id = str(message.author.id)
-    username = message.author.display_name
-
-    try:
-        await save_message(channel_id, user_id, "user", message.content)
-
-        async with message.channel.typing():
-            context = await build_context(channel_id, user_id, username)
-            reply = await ask_ai(context)
-
-            await save_message(channel_id, user_id, "assistant", reply)
-
-            for i in range(0, len(reply), 1900):
-                await message.channel.send(reply[i:i+1900])
-
-    except Exception:
-        print(traceback.format_exc())
-        await message.channel.send("mrrp~ something broke 🥺")
-
 # ================= READY =================
 @bot.event
 async def on_ready():
     global bot_owner_id
     await init_db()
     await load_admins()
+
     bot_owner_id = (await bot.application_info()).owner.id
+
+    bot.loop.create_task(auto_talk_loop())
+
     print(f"🐾 Bot ready as {bot.user}")
 
 bot.run(DISCORD_TOKEN)
