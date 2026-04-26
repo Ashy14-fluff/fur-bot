@@ -33,12 +33,12 @@ bot_owner_id: Optional[int] = None
 
 SYSTEM_PROMPT = """
 You are Fur Bot 🐾.
-You are friendly, cute, helpful, and remember users using stored memory.
-Be consistent and natural.
+You are cute, helpful, and conversational.
+You remember context and respond naturally.
 """
 
 
-# ================= INIT DB =================
+# ================= DB INIT =================
 async def init_db():
     global db
     if db:
@@ -70,7 +70,6 @@ async def init_db():
 
             await conn.execute("""
             CREATE TABLE IF NOT EXISTS user_facts(
-                id BIGSERIAL PRIMARY KEY,
                 user_id TEXT,
                 fact TEXT,
                 created_at TIMESTAMPTZ DEFAULT NOW()
@@ -78,7 +77,7 @@ async def init_db():
             """)
 
 
-# ================= ADMIN SYSTEM =================
+# ================= ADMIN =================
 async def is_admin(uid: str):
     return uid in admins or (bot_owner_id and int(uid) == bot_owner_id)
 
@@ -92,51 +91,74 @@ async def load_admins():
 
 # ================= MEMORY =================
 async def save_message(channel_id, user_id, role, content):
-    async with db.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO messages(channel_id,user_id,role,content) VALUES($1,$2,$3,$4)",
-            channel_id, user_id, role, content[:2000]
-        )
+    try:
+        async with db.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO messages(channel_id,user_id,role,content) VALUES($1,$2,$3,$4)",
+                channel_id, user_id, role, content[:2000]
+            )
+    except Exception as e:
+        print("DB save error:", e)
 
 
 async def load_history(channel_id, limit=20):
-    async with db.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT role,content FROM messages WHERE channel_id=$1 ORDER BY id DESC LIMIT $2",
-            channel_id, limit
-        )
-    return list(reversed([dict(r) for r in rows]))
+    try:
+        async with db.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT role,content FROM messages WHERE channel_id=$1 ORDER BY id DESC LIMIT $2",
+                channel_id, limit
+            )
+        return list(reversed([dict(r) for r in rows]))
+    except Exception as e:
+        print("DB load error:", e)
+        return []
 
 
 async def save_fact(user_id, fact):
-    async with db.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO user_facts(user_id,fact) VALUES($1,$2)",
-            user_id, fact[:500]
-        )
+    try:
+        async with db.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO user_facts(user_id,fact) VALUES($1,$2)",
+                user_id, fact[:500]
+            )
+    except Exception as e:
+        print("fact save error:", e)
 
 
 async def load_facts(user_id):
-    async with db.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT fact FROM user_facts WHERE user_id=$1 ORDER BY id DESC LIMIT 10",
-            user_id
-        )
-    return [r["fact"] for r in rows]
+    try:
+        async with db.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT fact FROM user_facts WHERE user_id=$1 LIMIT 10",
+                user_id
+            )
+        return [r["fact"] for r in rows]
+    except:
+        return []
 
 
-# ================= AI =================
+# ================= AI CALL (FIXED SAFE) =================
 async def ask_ai(messages):
-    def run():
-        res = groq.chat.completions.create(
-            model=MODEL,
-            messages=messages,
-            temperature=0.85,
-            max_tokens=700
-        )
-        return res.choices[0].message.content
+    try:
+        def run():
+            res = groq.chat.completions.create(
+                model=MODEL,
+                messages=messages,
+                temperature=0.85,
+                max_tokens=700
+            )
+            return res.choices[0].message.content
 
-    return await asyncio.to_thread(run)
+        result = await asyncio.to_thread(run)
+
+        if not result:
+            return "mrrp… me didn’t get response 🥺"
+
+        return result
+
+    except Exception as e:
+        print("GROQ ERROR:", repr(e))
+        return "mrrp… AI broke 🥺"
 
 
 # ================= CONTEXT =================
@@ -152,20 +174,11 @@ async def build_context(channel_id, user_id, username):
     if facts:
         msgs.append({
             "role": "system",
-            "content": "MEMORY:\n- " + "\n- ".join(facts)
+            "content": "Memory:\n- " + "\n- ".join(facts)
         })
 
     msgs.extend(history)
     return msgs
-
-
-# ================= MEMORY EXTRACTION =================
-async def extract_memory(text: str):
-    keywords = ["my name is", "i like", "remember", "i am"]
-    t = text.lower()
-    if any(k in t for k in keywords):
-        return text[:200]
-    return None
 
 
 # ================= CHAT =================
@@ -174,31 +187,35 @@ async def on_message(message):
     if message.author.bot:
         return
 
-    if message.content.startswith("!"):
-        await bot.process_commands(message)
-        return
+    try:
+        if message.content.startswith("!"):
+            await bot.process_commands(message)
+            return
 
-    channel_id = str(message.channel.id)
-    user_id = str(message.author.id)
+        channel_id = str(message.channel.id)
+        user_id = str(message.author.id)
 
-    await save_message(channel_id, user_id, "user", message.content)
+        await save_message(channel_id, user_id, "user", message.content)
 
-    mem = await extract_memory(message.content)
-    if mem:
-        await save_fact(user_id, mem)
+        async with message.channel.typing():
+            context = await build_context(channel_id, user_id, message.author.display_name)
+            reply = await ask_ai(context)
 
-    async with message.channel.typing():
-        context = await build_context(channel_id, user_id, message.author.display_name)
-        reply = await ask_ai(context)
+            await save_message(channel_id, user_id, "assistant", reply)
 
-        await save_message(channel_id, user_id, "assistant", reply)
+            if not reply:
+                await message.channel.send("mrrp… no reply 🥺")
+                return
 
-        for chunk in [reply[i:i+1900] for i in range(0, len(reply), 1900)]:
-            await message.channel.send(chunk)
+            for chunk in [reply[i:i+1900] for i in range(0, len(reply), 1900)]:
+                await message.channel.send(chunk)
+
+    except Exception as e:
+        print("ON_MESSAGE ERROR:", repr(e))
+        await message.channel.send("error happened 🥺")
 
 
-# ================= ADMIN COMMANDS (RESTORED FULL) =================
-
+# ================= ADMIN COMMANDS =================
 @bot.command()
 async def addadmin(ctx, member: discord.Member):
     if not await is_admin(str(ctx.author.id)):
@@ -211,7 +228,7 @@ async def addadmin(ctx, member: discord.Member):
         )
 
     admins.add(str(member.id))
-    await ctx.send(f"added admin {member.mention} 🐾")
+    await ctx.send("admin added 🐾")
 
 
 @bot.command()
@@ -228,10 +245,7 @@ async def removeadmin(ctx, member: discord.Member):
 
 @bot.command()
 async def listadmins(ctx):
-    if not admins:
-        return await ctx.send("no admins yet 🐾")
-
-    await ctx.send("Admins:\n" + "\n".join(f"<@{a}>" for a in admins))
+    await ctx.send("\n".join(f"<@{a}>" for a in admins) or "no admins")
 
 
 @bot.command()
@@ -252,16 +266,6 @@ async def ban(ctx, member: discord.Member):
     await ctx.send("banned 💢")
 
 
-@bot.command()
-async def unban(ctx, user_id: int):
-    if not await is_admin(str(ctx.author.id)):
-        return await ctx.send("no permission 🥺")
-
-    user = await bot.fetch_user(user_id)
-    await ctx.guild.unban(user)
-    await ctx.send("unbanned 🐾")
-
-
 # ================= READY =================
 @bot.event
 async def on_ready():
@@ -272,7 +276,7 @@ async def on_ready():
 
     bot_owner_id = (await bot.application_info()).owner.id
 
-    print(f"🐾 Bot ready | Owner: {bot_owner_id} | Admins: {len(admins)}")
+    print(f"Bot ready 🐾 | admins: {len(admins)}")
 
 
 bot.run(DISCORD_TOKEN)
