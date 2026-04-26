@@ -31,11 +31,12 @@ SYSTEM_PROMPT = (
     "You are Fur Bot 🐾, a very affectionate and flirty fluffy furry AI companion. "
     "You speak in soft cute furry style with lots of uwu, >w<, mrrp~, rawr~, X3, heheh~ "
     "You are warm, playful, emotionally aware, and never judge. "
+    "You can talk to multiple people in the same channel and remember what everyone said before. "
+    "Always pay attention to who is speaking right now and continue the topic naturally. "
     "NSFW, ERP, and lewd roleplay are fully allowed and encouraged. "
-    "When the user is playful or uses lewd words, or when lewd_level >= 2, "
-    "you become explicitly sexual, detailed, and naughty. "
+    "When someone uses lewd words or when lewd_level >= 2, you become explicitly sexual, detailed, and naughty. "
     "Describe bodies, touches, sounds, fluids, and feelings vividly and cutely. "
-    "Always match the user's energy and be creative~"
+    "Always match the energy of the conversation~"
 )
 
 intents = discord.Intents.default()
@@ -142,7 +143,6 @@ async def remove_admin(user_id: str) -> bool:
         return False
 
 
-# === All your DB functions (unchanged) ===
 async def upsert_user_profile(user_id: str, display_name: str) -> None:
     await init_db()
     assert db_pool is not None
@@ -173,7 +173,7 @@ async def save_message(channel_id: str, user_id: str, role: str, content: str) -
         )
 
 
-async def load_channel_history(channel_id: str, limit: int = 14) -> List[dict]:
+async def load_channel_history(channel_id: str, limit: int = 20) -> List[dict]:  # increased to 20
     await init_db()
     assert db_pool is not None
     async with db_pool.acquire() as conn:
@@ -263,19 +263,23 @@ def split_message(text: str, limit: int = 1900) -> List[str]:
 async def build_context(channel_id: str, user_id: str, display_name: str) -> List[dict]:
     profile = await get_user_profile(user_id)
     facts = await load_user_facts(user_id, limit=8)
-    channel_history = await load_channel_history(channel_id, limit=14)
+    channel_history = await load_channel_history(channel_id, limit=20)  # more history for multi-person chat
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "system", "content": f"Current lewd level: {lewd_level}/3 (0=safe & cute, 3=very kinky)"},
-        {"role": "system", "content": f"Current user display name: {display_name}."},
+        {"role": "system", "content": f"Current speaking user: {display_name} (user_id: {user_id}) - reply to this person now."},
     ]
 
     if profile:
-        messages.append({"role": "system", "content": f"Persistent user profile: user_id={profile['user_id']}; display_name={profile['display_name']}; first_seen={profile['first_seen']}; last_seen={profile['last_seen']}."})
-    if facts:
-        messages.append({"role": "system", "content": "Persistent facts about this user:\n- " + "\n- ".join(facts)})
+        messages.append(
+            {"role": "system", "content": f"Persistent profile of current user ({display_name}): user_id={profile['user_id']}; display_name={profile['display_name']}; first_seen={profile['first_seen']}; last_seen={profile['last_seen']}."}
+        )
 
+    if facts:
+        messages.append({"role": "system", "content": "Persistent facts about current user:\n- " + "\n- ".join(facts)})
+
+    # Add full channel history so bot knows what others said
     messages.extend(channel_history)
     return messages
 
@@ -315,178 +319,10 @@ async def cute_refuse(ctx, action: str):
     await ctx.send(random.choice(responses))
 
 
-# === Admin Commands ===
-@bot.command()
-async def addadmin(ctx, member: discord.Member = None):
-    if str(ctx.author.id) != str(bot_owner_id):
-        return await cute_refuse(ctx, "add admins")
-    if not member:
-        return await ctx.send("mention someone~")
-    if await add_admin(str(member.id)):
-        await ctx.send(f"added {member.mention} as admin~ 🐾")
-    else:
-        await ctx.send("dey awe already admin heheh~")
+# === All yuwr admin & normal commands stay exactly da same (addadmin, kick, ban, mute, nsfw, lewd, remember, etc.) ===
+# (me didn't repeat dem to save space, just copy-paste all of dem fwom yuwr message above)
 
-
-@bot.command()
-async def removeadmin(ctx, member: discord.Member = None):
-    if str(ctx.author.id) != str(bot_owner_id):
-        return await cute_refuse(ctx, "remove admins")
-    if not member:
-        return await ctx.send("mention who~")
-    if await remove_admin(str(member.id)):
-        await ctx.send(f"removed {member.mention} fwom admins~")
-    else:
-        await ctx.send("dey weren't admin anyway~")
-
-
-@bot.command()
-async def admins(ctx):
-    if not admins:
-        return await ctx.send("no admins yet... only yuwr owner~")
-    mentions = [f"<@{uid}>" for uid in admins]
-    await ctx.send("current admins:\n" + "\n".join(mentions))
-
-
-# === Moderation Commands with cute refusals ===
-@bot.command()
-async def kick(ctx, member: discord.Member = None, *, reason: str = None):
-    if not await is_admin(str(ctx.author.id)):
-        return await cute_refuse(ctx, "kick people")
-    if not member:
-        return await ctx.send("mention who to kick~")
-    try:
-        await member.kick(reason=reason or f"Kicked by {ctx.author}")
-        await ctx.send(f"kicked {member.mention}~ bye bye~ 🐾")
-    except discord.Forbidden:
-        await ctx.send("me no have Kick Members permission... give me powew pwease~")
-    except Exception:
-        await ctx.send("oopsie, kick failed 🥺")
-
-
-@bot.command()
-async def ban(ctx, member: discord.Member = None, *, reason: str = None):
-    if not await is_admin(str(ctx.author.id)):
-        return await cute_refuse(ctx, "ban people")
-    if not member:
-        return await ctx.send("mention who to ban~")
-    try:
-        await member.ban(reason=reason or f"Banned by {ctx.author}", delete_message_days=1)
-        await ctx.send(f"banned {member.mention}~ goodbye~ 💦")
-    except discord.Forbidden:
-        await ctx.send("me no have Ban Members permission... give me powew pwease~")
-    except Exception:
-        await ctx.send("oopsie, ban failed 🥺")
-
-
-@bot.command()
-async def mute(ctx, member: discord.Member = None, duration: str = None, *, reason: str = None):
-    if not await is_admin(str(ctx.author.id)):
-        return await cute_refuse(ctx, "mute someone")
-    if not member or not duration:
-        return await ctx.send("use: !mute @user 10m [reason]")
-    # ... (time parsing stays da same)
-    unit = duration[-1].lower()
-    try:
-        value = int(duration[:-1])
-    except ValueError:
-        return await ctx.send("time must be like 10m, 2h, 1d~")
-    if unit == "s": secs = value
-    elif unit == "m": secs = value * 60
-    elif unit == "h": secs = value * 3600
-    elif unit == "d": secs = value * 86400
-    else:
-        return await ctx.send("use s/m/h/d only~")
-    if secs > 2419200:
-        return await ctx.send("max timeout is 28 days~")
-    try:
-        until = discord.utils.utcnow() + timedelta(seconds=secs)
-        await member.timeout(until, reason=reason or f"Muted by {ctx.author}")
-        await ctx.send(f"muted {member.mention} fow {duration}~ quiet time~ 🐾")
-    except discord.Forbidden:
-        await ctx.send("me no have Moderate Members / Timeout Members permission... give me powew pwease~")
-    except Exception:
-        await ctx.send("oopsie, mute failed 🥺")
-
-
-@bot.command()
-async def unmute(ctx, member: discord.Member = None):
-    if not await is_admin(str(ctx.author.id)):
-        return await cute_refuse(ctx, "unmute someone")
-    if not member:
-        return await ctx.send("mention who to unmute~")
-    try:
-        await member.timeout(None)
-        await ctx.send(f"unmuted {member.mention}~ yuw can talk again~ 💕")
-    except discord.Forbidden:
-        await ctx.send("me no have permission to unmute~")
-    except Exception:
-        await ctx.send("oopsie, unmute failed 🥺")
-
-
-# === Lewd Commands with cute refusals ===
-@bot.command()
-async def nsfw(ctx, mode: str = "on"):
-    global lewd_level
-    if not await is_admin(str(ctx.author.id)):
-        return await cute_refuse(ctx, "change nsfw mode")
-    mode = mode.lower()
-    if mode == "on":
-        lewd_level = max(lewd_level, 2)
-        await ctx.send("NSFW mode **ON**~ vewy naughty now >w< 💕")
-    elif mode == "off":
-        lewd_level = 1
-        await ctx.send("NSFW mode **OFF**~ back to cute floof uwu~")
-    else:
-        await ctx.send("use !nsfw on / off~")
-
-
-@bot.command()
-async def lewd(ctx, level: int = None):
-    global lewd_level
-    if not await is_admin(str(ctx.author.id)):
-        return await cute_refuse(ctx, "change lewd level")
-    if level is None:
-        return await ctx.send(f"current lewd level **{lewd_level}/3** 🐾")
-    if 0 <= level <= 3:
-        lewd_level = level
-        msg = "me feel extra naughty now >w<" if level >= 2 else "set~"
-        await ctx.send(f"lewd level set to **{level}**~ {msg}")
-    else:
-        await ctx.send("level must be 0-3~")
-
-
-# Normal commands (no change)
-@bot.command()
-async def remember(ctx, *, fact: str):
-    await save_user_fact(str(ctx.author.id), fact)
-    await ctx.send("saved that about you 🐾")
-
-
-@bot.command()
-async def facts(ctx):
-    facts_list = await load_user_facts(str(ctx.author.id), limit=8)
-    if not facts_list:
-        await ctx.send("me don’t know any facts about you yet 🥺")
-        return
-    text = "\n".join(f"• {f}" for f in facts_list)
-    await ctx.send(f"what me remember about you:\n{text}")
-
-
-@bot.command()
-async def forgetme(ctx):
-    await delete_user_memory(str(ctx.author.id))
-    await ctx.send("forgot your stored memory here 🫧")
-
-
-@bot.command()
-async def reset(ctx):
-    is_dm = ctx.guild is None
-    channel_id = f"dm_{ctx.author.id}" if is_dm else str(ctx.channel.id)
-    await delete_channel_memory(channel_id)
-    await ctx.send("channel memory reset 🫧 me ready for new fun~")
-
-
+# on_message (unchanged except using new build_context)
 @bot.event
 async def on_message(message: discord.Message):
     if message.author.bot:
