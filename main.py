@@ -149,6 +149,7 @@ async def load_admins():
 async def get_channel_settings(channel_id: str):
     """Get smart memory settings for a channel"""
     try:
+        await init_db()
         async with db.acquire() as conn:
             settings = await conn.fetchrow(
                 "SELECT context_messages, context_hours FROM channel_settings WHERE channel_id=$1",
@@ -173,7 +174,7 @@ async def save_msg(channel_id: str, user_id: str, username: str, role: str, cont
                    VALUES($1, $2, $3, $4, $5)""",
                 channel_id, user_id, username, role, content[:2000]
             )
-        print(f"💾 Saved message from {username} in channel {channel_id}")
+        print(f"💾 [{channel_id}] Saved {role}: {content[:50]}...")
     except Exception as e:
         print(f"❌ Failed to save message: {e}")
 
@@ -188,6 +189,7 @@ async def load_conversation_context(channel_id: str) -> List[dict]:
     - Reverses to chronological order
     """
     try:
+        await init_db()
         msg_limit, hour_window = await get_channel_settings(channel_id)
         
         async with db.acquire() as conn:
@@ -217,7 +219,7 @@ async def load_conversation_context(channel_id: str) -> List[dict]:
                     "content": r["content"]
                 })
 
-        print(f"📚 Loaded {len(history)} messages from last {hour_window}h for channel {channel_id}")
+        print(f"📚 Loaded {len(history)} messages from last {hour_window}h")
         return history
         
     except Exception as e:
@@ -228,6 +230,7 @@ async def load_conversation_context(channel_id: str) -> List[dict]:
 async def cleanup_old_messages():
     """Periodically clean up messages older than 30 days"""
     try:
+        await init_db()
         async with db.acquire() as conn:
             result = await conn.execute(
                 "DELETE FROM messages WHERE created_at < NOW() - INTERVAL '30 days'"
@@ -247,7 +250,7 @@ async def ask_ai(messages: List[dict], channel_id: str = None) -> Optional[str]:
     """
     def run():
         try:
-            print(f"→ [{channel_id}] Sending {len(messages)} messages to Groq...")
+            print(f"→ Sending {len(messages)} messages to Groq...")
             
             res = groq.chat.completions.create(
                 model=GROQ_MODEL,
@@ -257,7 +260,7 @@ async def ask_ai(messages: List[dict], channel_id: str = None) -> Optional[str]:
             )
             
             usage = res.usage
-            print(f"✓ Groq success | Input: {usage.prompt_tokens}, Output: {usage.completion_tokens}")
+            print(f"✓ Groq success | Tokens: {usage.prompt_tokens} → {usage.completion_tokens}")
             return res.choices[0].message.content
             
         except Exception as e:
@@ -323,6 +326,7 @@ async def on_ready():
         print(f"✓ Bot ready 🐾 | Owner: {bot_owner_id}")
         print(f"✓ Admins: {len(admins)} | Model: {GROQ_MODEL}")
         print(f"✓ Memory: 72 hours (3 days) by default")
+        print(f"✓ Database initialized and ready\n")
         
     except Exception as e:
         print(f"❌ Startup error: {e}")
@@ -669,7 +673,7 @@ async def list_commands(ctx):
 # ================= MAIN CHAT HANDLER =================
 @bot.event
 async def on_message(message):
-    """Process all messages"""
+    """Process all messages - THIS IS THE FIX"""
     # Ignore bot messages
     if message.author.bot:
         return
@@ -684,13 +688,17 @@ async def on_message(message):
     user_id = str(message.author.id)
     username = message.author.display_name
 
-    # Save user message to database
-    await save_msg(channel_id, user_id, username, "user", message.content)
+    print(f"\n📥 Got message from {username}: {message.content[:50]}...")
 
     try:
         async with message.channel.typing():
-            # Load conversation context (smart memory with 72 hour window)
+            # LOAD HISTORY FIRST (before saving this message)
             history = await load_conversation_context(channel_id)
+            print(f"📚 Loaded {len(history)} previous messages")
+
+            # NOW SAVE THE CURRENT MESSAGE
+            await save_msg(channel_id, user_id, username, "user", message.content)
+            print(f"💾 Saved user message")
 
             # Build context for AI
             context = [
@@ -699,12 +707,15 @@ async def on_message(message):
                 {"role": "user", "content": message.content}
             ]
 
+            print(f"🧠 Sending {len(context)} messages to AI (system + history + new message)")
+
             # Get AI response
             reply = await ask_ai(context, channel_id)
 
             if reply:
-                # Save bot response
+                # SAVE BOT RESPONSE
                 await save_msg(channel_id, "bot", "Fur Bot 🐾", "assistant", reply)
+                print(f"💾 Saved bot response\n")
 
                 # Send response (split if needed)
                 for chunk in split_message(reply):
@@ -722,7 +733,7 @@ async def on_message(message):
 # ================= STARTUP =================
 if __name__ == "__main__":
     try:
-        print("🐾 Fur Bot starting...")
+        print("🐾 Fur Bot starting...\n")
         bot.run(DISCORD_TOKEN)
     except KeyboardInterrupt:
         print("\n🐾 Shutting down...")
