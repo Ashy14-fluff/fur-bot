@@ -70,6 +70,7 @@ You are not a boring assistant.
 You are a living fluffy companion 🐾
 """
 
+
 # ================= DB =================
 async def init_db():
     global db
@@ -176,6 +177,21 @@ def is_bot_reply(message: discord.Message) -> bool:
     resolved = message.reference.resolved
     author = getattr(resolved, "author", None)
     return bool(author and bot.user and author.id == bot.user.id)
+
+
+def current_live_mood(channel_id: str) -> str:
+    mood = channel_mood.get(channel_id, "neutral")
+    idle = time.monotonic() - channel_last_activity.get(channel_id, time.monotonic())
+
+    if idle > 1800:
+        return "sleepy 😴"
+    if mood == "soft":
+        return "soft 🥺"
+    if mood == "happy":
+        return "happy ✨"
+    if mood == "playful":
+        return "playful >:3"
+    return "neutral 🐾"
 
 
 # ================= MEMORY =================
@@ -437,6 +453,12 @@ async def clearhistory(ctx):
 
 
 @bot.command()
+async def mood(ctx):
+    channel_id = str(ctx.channel.id)
+    await ctx.send(f"mrrp~ live mood here 🐾\n**{current_live_mood(channel_id)}**")
+
+
+@bot.command()
 async def status(ctx):
     if not await is_admin(str(ctx.author.id)):
         return await ctx.send("mrrp~ no permission 🥺")
@@ -446,12 +468,13 @@ async def status(ctx):
         admin_count = await conn.fetchval("SELECT COUNT(*) FROM admins")
         fact_count = await conn.fetchval("SELECT COUNT(*) FROM user_facts")
 
+    channel_id = str(ctx.channel.id)
     embed = discord.Embed(title="Fur Bot Status 🐾", color=discord.Color.magenta())
     embed.add_field(name="Messages", value=str(msg_count), inline=True)
     embed.add_field(name="Admins", value=str(admin_count), inline=True)
     embed.add_field(name="Facts", value=str(fact_count), inline=True)
     embed.add_field(name="Model", value=MODEL, inline=False)
-    embed.add_field(name="Mood", value=channel_mood.get(str(ctx.channel.id), "neutral"), inline=False)
+    embed.add_field(name="Mood", value=current_live_mood(channel_id), inline=False)
     await ctx.send(embed=embed)
 
 
@@ -520,8 +543,6 @@ async def auto_talk_loop():
 # ================= CHAT =================
 @bot.event
 async def on_message(message: discord.Message):
-    global bot_owner_id
-
     if message.author.bot:
         return
 
