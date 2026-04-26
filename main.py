@@ -1,103 +1,158 @@
+import os
+import json
+import asyncio
+import random
+from typing import Dict, List
+
 import discord
 from discord.ext import commands
-import json
-import os
-import random
+from dotenv import load_dotenv
+from groq import Groq
 
-# ===== CONFIG =====
+load_dotenv()
+
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+
+if not DISCORD_TOKEN:
+    raise RuntimeError("DISCORD_TOKEN is missing from your environment variables.")
+if not GROQ_API_KEY:
+    raise RuntimeError("GROQ_API_KEY is missing from your environment variables.")
+
+client = Groq(api_key=GROQ_API_KEY)
+
+MEMORY_FILE = "memory.json"
+MAX_MESSAGES_PER_CHANNEL = 15
 
 SYSTEM_PROMPT = (
-    "You are Fur Bot 🐾, a cute fluffy AI. "
-    "You speak in a playful, warm furry style (uwu, >w<, mrrp) but stay readable. "
-    "You remember conversations and respond naturally."
+    "You are Fur Bot 🐾, a cute fluffy Discord AI companion. "
+    "You speak in a soft furry style with occasional uwu, >w<, mrrp, and cute reactions, "
+    "but you must stay readable and helpful. "
+    "You remember the recent conversation in each channel and keep continuity. "
+    "You are warm, playful, emotionally aware, and natural. "
+    "Do not be robotic."
 )
 
-# ===== MEMORY SYSTEM =====
-MEMORY_FILE = "memory.json"
-
-def load_memory():
-    if os.path.exists(MEMORY_FILE):
+def load_memory() -> Dict[str, List[dict]]:
+    if not os.path.exists(MEMORY_FILE):
+        return {}
+    try:
         with open(MEMORY_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception as e:
+        print("Could not load memory.json:", e)
     return {}
 
-def save_memory(data):
-    with open(MEMORY_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+def save_memory(memory: Dict[str, List[dict]]) -> None:
+    try:
+        with open(MEMORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(memory, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print("Could not save memory.json:", e)
 
 memory = load_memory()
 
-# ===== DISCORD SETUP =====
 intents = discord.Intents.default()
 intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ===== FAKE AI (replace with your Groq call) =====
-def ask_ai(messages):
-    # REPLACE THIS WITH YOUR GROQ API
-    last_user = messages[-1]["content"]
-    return f"mrrp~ yuw said: {last_user} >w<"
+def trim_channel_memory(channel_id: str) -> None:
+    if channel_id in memory:
+        memory[channel_id] = memory[channel_id][-MAX_MESSAGES_PER_CHANNEL:]
 
-# ===== EVENTS =====
-@bot.event
-async def on_ready():
-    print(f"Logged in as {bot.user}")
+def split_message(text: str, limit: int = 1900):
+    text = text or ""
+    if not text.strip():
+        return ["mrrp... empty reply 🥺"]
+    return [text[i:i + limit] for i in range(0, len(text), limit)]
 
-@bot.event
-async def on_message(message):
-    if message.author == bot.user:
-        return
-
-    channel_id = str(message.channel.id)
-    user_name = message.author.display_name
-
-    # init memory
+async def ask_ai(channel_id: str, user_name: str, prompt: str) -> str:
     if channel_id not in memory:
         memory[channel_id] = []
 
-    # save user message
     memory[channel_id].append({
         "role": "user",
-        "content": f"{user_name}: {message.content}"
+        "content": f"{user_name}: {prompt}"
     })
+    trim_channel_memory(channel_id)
 
-    # limit memory (important)
-    memory[channel_id] = memory[channel_id][-15:]
-
-    # build messages for AI
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     messages.extend(memory[channel_id])
 
-    # get AI reply
-    reply = ask_ai(messages)
+    def call_groq():
+        completion = client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=messages,
+            temperature=0.9,
+        )
+        return completion.choices[0].message.content or ""
 
-    # save bot reply
+    reply = await asyncio.to_thread(call_groq)
+
     memory[channel_id].append({
         "role": "assistant",
         "content": reply
     })
-
+    trim_channel_memory(channel_id)
     save_memory(memory)
 
-    # send reply
-    await message.channel.send(reply)
+    return reply
 
-    # cute reactions
-    if random.random() < 0.2:
-        await message.add_reaction("🐾")
+@bot.event
+async def on_ready():
+    print(f"Logged in as {bot.user}")
+    await bot.change_presence(activity=discord.Game(name="fluffy chats 🐾"))
 
-    if random.random() < 0.2:
-        await message.channel.send(random.choice([
-            "*tail wag*",
-            "*mrrp purr*",
-            "*ear twitch*"
-        ]))
+@bot.command()
+async def reset(ctx: commands.Context):
+    channel_id = str(ctx.channel.id)
+    memory.pop(channel_id, None)
+    save_memory(memory)
+    await ctx.send("memory reset 🫧")
+
+@bot.event
+async def on_message(message: discord.Message):
+    if message.author.bot:
+        return
+
+    if not message.guild:
+        return
+
+    content = message.content.strip()
+    if not content:
+        return
+
+    if content.lower() == "!reset":
+        channel_id = str(message.channel.id)
+        memory.pop(channel_id, None)
+        save_memory(memory)
+        await message.channel.send("memory reset 🫧")
+        return
+
+    async with message.channel.typing():
+        try:
+            reply = await ask_ai(
+                str(message.channel.id),
+                message.author.display_name,
+                content
+            )
+
+            for chunk in split_message(reply):
+                await message.channel.send(chunk)
+
+            if random.random() < 0.20:
+                await message.add_reaction("🐾")
+
+        except Exception as e:
+            print("Groq error:", repr(e))
+            await message.channel.send("oopsie, me hit an error 🥺")
 
     await bot.process_commands(message)
 
-# ===== AUTO RESTART LOOP =====
 while True:
     try:
         bot.run(DISCORD_TOKEN)
