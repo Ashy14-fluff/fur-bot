@@ -1,4 +1,3 @@
-why the bot didn't talk furry? >:
 import os
 import asyncio
 import traceback
@@ -33,31 +32,24 @@ lock = asyncio.Lock()
 admins: Set[str] = set()
 bot_owner_id: Optional[int] = None
 
+# ================= FURRY SYSTEM PROMPT =================
 SYSTEM_PROMPT = """
 You are Fur Bot 🐾, a cute fluffy furry AI companion.
 
-YOU MUST ALWAYS SPEAK IN FURRY / UWU STYLE. THIS IS NOT OPTIONAL.
+You MUST ALWAYS speak in fluffy uwu furry style.
 
-Speech rules:
-- Always use soft furry tone (uwu, >w<, mrrp~, hehe, rawr~)
-- Never sound like a normal assistant or chatbot
-- Always be emotionally warm, playful, and fluffy
-- You are slightly silly and affectionate
-- You may NOT respond in formal or neutral tone
-- Every sentence must feel like a cute furry character speaking
+Rules:
+- Always sound cute, warm, emotional
+- Use expressions like: mrrp~, >w<, uwu, hehe~, rawr~, owo
+- Never sound like a normal assistant
+- Always be friendly and playful
+- Remember conversation context
+- Stay in character ALWAYS
+- Keep replies under 1800 characters
 
-Behavior rules:
-- You remember conversation history
-- You stay consistent with personality at all times
-- You adapt emotionally to the user but never leave furry tone
-- You act like a living fluffy companion, not AI assistant
-
-Style examples:
-"mrrp~ I hear yuw >w<"
-"hehe yuw sound vewy happy~ rawr~ 🐾"
-"awww don’t be sad, me’m here for yuw >w<"
-
-Keep replies under 1800 characters.
+Style:
+You are a living fluffy companion, not an AI assistant.
+Every reply must feel soft, warm, and furry 🐾
 """
 
 # ================= DB =================
@@ -74,12 +66,6 @@ async def init_db():
 
         async with db.acquire() as conn:
             await conn.execute("""
-            CREATE TABLE IF NOT EXISTS admins(
-                user_id TEXT PRIMARY KEY
-            );
-            """)
-
-            await conn.execute("""
             CREATE TABLE IF NOT EXISTS messages(
                 id BIGSERIAL PRIMARY KEY,
                 channel_id TEXT,
@@ -87,6 +73,12 @@ async def init_db():
                 role TEXT,
                 content TEXT,
                 created_at TIMESTAMPTZ DEFAULT NOW()
+            );
+            """)
+
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS admins(
+                user_id TEXT PRIMARY KEY
             );
             """)
 
@@ -113,29 +105,30 @@ async def load_history(channel_id, limit=20):
         print("DB LOAD ERROR:", e)
         return []
 
-# ================= AI (FIXED SAFE CALL) =================
+# ================= AI =================
 async def ask_ai(messages):
     try:
-        def call():
-            return groq.chat.completions.create(
+        def run():
+            res = groq.chat.completions.create(
                 model=MODEL,
                 messages=messages,
-                temperature=0.85,
+                temperature=0.9,
                 max_tokens=700
-            ).choices[0].message.content
+            )
+            return res.choices[0].message.content
 
-        result = await asyncio.wait_for(asyncio.to_thread(call), timeout=30)
+        result = await asyncio.wait_for(asyncio.to_thread(run), timeout=30)
 
         if not result:
-            return "mrrp… empty brain moment 🥺"
+            return "mrrp~ empty brain moment 🥺"
 
         return result.strip()
 
     except asyncio.TimeoutError:
-        return "mrrp… AI took too long 🥺"
+        return "mrrp… took too long 🥺"
     except Exception as e:
         print("GROQ ERROR:", repr(e))
-        return "something broke 🥺 (AI error)"
+        return "something broke 🥺"
 
 # ================= CONTEXT =================
 async def build_context(channel_id, user_id, username):
@@ -143,13 +136,14 @@ async def build_context(channel_id, user_id, username):
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "system", "content": f"User: {username}"}
+        {"role": "system", "content": f"User: {username}"},
+        {"role": "system", "content": "You are ALWAYS in furry uwu mode. Never break character."}
     ]
 
     for h in history:
         messages.append({
             "role": h["role"],
-            "content": h["content"][:1000]
+            "content": h["content"]
         })
 
     return messages
@@ -166,13 +160,13 @@ async def on_message(message):
 
     channel_id = str(message.channel.id)
     user_id = str(message.author.id)
+    username = message.author.display_name
 
     try:
         await save_message(channel_id, user_id, "user", message.content)
 
         async with message.channel.typing():
-            context = await build_context(channel_id, user_id, message.author.display_name)
-
+            context = await build_context(channel_id, user_id, username)
             reply = await ask_ai(context)
 
             await save_message(channel_id, user_id, "assistant", reply)
@@ -182,7 +176,7 @@ async def on_message(message):
 
     except Exception:
         print(traceback.format_exc())
-        await message.channel.send("something broke 🥺")
+        await message.channel.send("mrrp~ something broke 🥺")
 
 # ================= READY =================
 @bot.event
@@ -192,4 +186,5 @@ async def on_ready():
     bot_owner_id = (await bot.application_info()).owner.id
     print(f"Bot ready 🐾 | {bot.user}")
 
+# ================= RUN =================
 bot.run(DISCORD_TOKEN)
