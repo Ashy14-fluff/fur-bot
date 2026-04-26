@@ -22,29 +22,28 @@ if not DISCORD_TOKEN or not GROQ_API_KEY or not DATABASE_URL:
 
 groq_client = Groq(api_key=GROQ_API_KEY)
 
-# 🐾 settings
+# ================= STATE =================
 lewd_level: int = 1
 bot_owner_id: Optional[int] = None
 admin_users: Set[str] = set()
 
-# 🧠 SAFE system prompt (won't break model)
 SYSTEM_PROMPT = (
     "You are Fur Bot 🐾, a cute fluffy AI companion. "
     "You speak in soft furry style (uwu, >w<, mrrp~). "
-    "You are helpful, friendly, and emotionally warm. "
-    "You always reply only to the current user speaking. "
-    "Keep responses natural and not robotic."
+    "You are friendly, helpful, and emotionally warm. "
+    "Always reply naturally and only to the current user."
 )
 
+# ================= DISCORD =================
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# ================= DB =================
 db_pool: Optional[asyncpg.Pool] = None
 db_lock = asyncio.Lock()
 
 
-# ================= DB =================
 async def init_db():
     global db_pool
     if db_pool:
@@ -92,19 +91,20 @@ async def init_db():
             """)
 
 
+# ================= ADMIN =================
 async def load_admins():
     global admin_users
     await init_db()
     async with db_pool.acquire() as conn:
-        rows = await conn.fetch("SELECT user_id FROM admins;")
+        rows = await conn.fetch("SELECT user_id FROM admins")
         admin_users = {r["user_id"] for r in rows}
 
 
-async def is_admin(user_id: str):
-    return user_id in admin_users or (bot_owner_id and int(user_id) == bot_owner_id)
+async def is_admin(uid: str):
+    return uid in admin_users or (bot_owner_id and int(uid) == bot_owner_id)
 
 
-# ================= memory =================
+# ================= MEMORY =================
 async def save_message(channel_id, user_id, role, content):
     await init_db()
     async with db_pool.acquire() as conn:
@@ -126,13 +126,16 @@ async def load_history(channel_id, limit=12):
 
 async def save_fact(user_id, fact):
     async with db_pool.acquire() as conn:
-        await conn.execute("INSERT INTO user_facts(user_id,fact) VALUES($1,$2)", user_id, fact[:500])
+        await conn.execute(
+            "INSERT INTO user_facts(user_id,fact) VALUES($1,$2)",
+            user_id, fact[:500]
+        )
 
 
 async def load_facts(user_id):
     async with db_pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT fact FROM user_facts WHERE user_id=$1 ORDER BY id DESC LIMIT 8",
+            "SELECT fact FROM user_facts WHERE user_id=$1 LIMIT 8",
             user_id
         )
     return [r["fact"] for r in rows]
@@ -144,24 +147,25 @@ async def ask_ai(messages):
         res = groq_client.chat.completions.create(
             model=GROQ_MODEL,
             messages=messages,
-            temperature=0.9
+            temperature=0.9,
+            max_tokens=800
         )
         return res.choices[0].message.content
 
     try:
-        msg = await asyncio.to_thread(run)
-        return msg or "mrrp… me blanked out 🥺"
+        out = await asyncio.to_thread(run)
+        return out or "mrrp… me blanked 🥺"
     except Exception as e:
         print("Groq error:", e)
-        return "mrrp… me brain lagged 🥺"
+        return "mrrp… AI broke a bit 🥺"
 
 
-# ================= helpers =================
+# ================= HELPERS =================
 def split(text):
     return [text[i:i+1900] for i in range(0, len(text), 1900)] or ["..."]
 
 
-# ================= events =================
+# ================= READY =================
 @bot.event
 async def on_ready():
     global bot_owner_id
@@ -169,10 +173,46 @@ async def on_ready():
     await load_admins()
 
     bot_owner_id = (await bot.application_info()).owner.id
-    print("bot ready 🐾")
+    print(f"Bot ready 🐾 | Owner: {bot_owner_id} | Admins: {len(admin_users)}")
 
 
-# ================= commands =================
+# ================= ADMIN COMMANDS =================
+@bot.command()
+async def addadmin(ctx, member: discord.Member):
+    if not await is_admin(str(ctx.author.id)):
+        return await ctx.send("no permission 🥺")
+
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO admins(user_id) VALUES($1) ON CONFLICT DO NOTHING",
+            str(member.id)
+        )
+
+    admin_users.add(str(member.id))
+    await ctx.send(f"added {member.mention} 🐾")
+
+
+@bot.command()
+async def removeadmin(ctx, member: discord.Member):
+    if not await is_admin(str(ctx.author.id)):
+        return await ctx.send("no permission 🥺")
+
+    async with db_pool.acquire() as conn:
+        await conn.execute("DELETE FROM admins WHERE user_id=$1", str(member.id))
+
+    admin_users.discard(str(member.id))
+    await ctx.send(f"removed {member.mention} 🐾")
+
+
+@bot.command()
+async def admins(ctx):
+    if not admin_users:
+        return await ctx.send("no admins yet 🥺")
+
+    await ctx.send("\n".join(f"<@{x}>" for x in admin_users))
+
+
+# ================= FUN MEMORY COMMANDS =================
 @bot.command()
 async def remember(ctx, *, fact):
     await save_fact(str(ctx.author.id), fact)
@@ -182,30 +222,10 @@ async def remember(ctx, *, fact):
 @bot.command()
 async def facts(ctx):
     f = await load_facts(str(ctx.author.id))
-    await ctx.send("\n".join(f) if f else "no memory yet 🥺")
+    await ctx.send("\n".join(f) if f else "no memory 🥺")
 
 
-@bot.command()
-async def addadmin(ctx, member: discord.Member):
-    if not await is_admin(str(ctx.author.id)):
-        return await ctx.send("no permission 🥺")
-
-    async with db_pool.acquire() as conn:
-        await conn.execute("INSERT INTO admins(user_id) VALUES($1) ON CONFLICT DO NOTHING", str(member.id))
-
-    admin_users.add(str(member.id))
-    await ctx.send("admin added 🐾")
-
-
-@bot.command()
-async def listadmins(ctx):
-    if not admin_users:
-        return await ctx.send("no admins yet 🥺")
-
-    await ctx.send("\n".join(f"<@{x}>" for x in admin_users))
-
-
-# ================= chat =================
+# ================= CHAT =================
 @bot.event
 async def on_message(message):
     if message.author.bot:
@@ -222,8 +242,11 @@ async def on_message(message):
 
     async with message.channel.typing():
         try:
+            history = await load_history(channel_id)
+
             ctx = [
                 {"role": "system", "content": SYSTEM_PROMPT},
+                *history,
                 {"role": "user", "content": message.content}
             ]
 
@@ -236,7 +259,7 @@ async def on_message(message):
 
         except Exception as e:
             print("error:", e)
-            await message.channel.send("mrrp… error happened 🥺")
+            await message.channel.send("mrrp… something broke 🥺")
 
 
 bot.run(DISCORD_TOKEN)
