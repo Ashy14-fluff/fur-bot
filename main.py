@@ -2,7 +2,7 @@ import os
 import asyncio
 import random
 from datetime import datetime, timezone
-from typing import Optional, List
+from typing import Optional, List, Dict
 
 import asyncpg
 import discord
@@ -42,6 +42,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 db_pool: Optional[asyncpg.Pool] = None
 db_lock = asyncio.Lock()
+channel_mood: Dict[str, str] = {}
 
 
 async def init_db() -> None:
@@ -100,6 +101,29 @@ async def init_db() -> None:
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_user_facts_user_id_id ON user_facts(user_id, id);"
             )
+
+
+def get_display_name(author: discord.abc.User) -> str:
+    return getattr(author, "display_name", author.name)
+
+
+def get_channel_key(message: discord.Message) -> str:
+    if message.guild is None:
+        return f"dm_{message.author.id}"
+    return f"ch_{message.channel.id}"
+
+
+def mood_from_text(text: str) -> str:
+    t = text.lower()
+    if any(word in t for word in ["sad", "cry", "hurt", "lonely", "bad"]):
+        return "soft"
+    if any(word in t for word in ["happy", "yay", "good", "nice", "love"]):
+        return "excited"
+    if any(word in t for word in ["sleep", "tired", "zzz"]):
+        return "sleepy"
+    if any(word in t for word in ["wow", "omg", "haha", "lol"]):
+        return "playful"
+    return "neutral"
 
 
 async def upsert_user_profile(user_id: str, display_name: str) -> None:
@@ -242,6 +266,7 @@ async def build_context(channel_id: str, user_id: str, display_name: str) -> Lis
     profile = await get_user_profile(user_id)
     facts = await load_user_facts(user_id, limit=8)
     channel_history = await load_channel_history(channel_id, limit=14)
+    mood = channel_mood.get(channel_id, "neutral")
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -249,6 +274,7 @@ async def build_context(channel_id: str, user_id: str, display_name: str) -> Lis
             "role": "system",
             "content": (
                 f"Current user display name: {display_name}. "
+                f"Current mood for this chat: {mood}. "
                 f"Use the stored long-term memory below when relevant."
             ),
         },
@@ -301,8 +327,6 @@ async def on_ready():
 
 @bot.command()
 async def remember(ctx: commands.Context, *, fact: str):
-    if not ctx.guild and not isinstance(ctx.channel, discord.DMChannel):
-        return
     await save_user_fact(str(ctx.author.id), fact)
     await ctx.send("saved that about you 🐾")
 
@@ -326,8 +350,9 @@ async def forgetme(ctx: commands.Context):
 
 @bot.command()
 async def reset(ctx: commands.Context):
-    channel_id = f"dm_{ctx.author.id}" if isinstance(ctx.channel, discord.DMChannel) else str(ctx.channel.id)
-    await delete_channel_memory(channel_id)
+    channel_key = get_channel_key(ctx.message)
+    await delete_channel_memory(channel_key)
+    channel_mood.pop(channel_key, None)
     await ctx.send("channel memory reset 🫧")
 
 
@@ -340,24 +365,32 @@ async def on_message(message: discord.Message):
     if not content:
         return
 
-    # Keep commands working
     if content.startswith("!"):
         await bot.process_commands(message)
         return
 
-    is_dm = message.guild is None
-    channel_id = f"dm_{message.author.id}" if is_dm else str(message.channel.id)
+    channel_key = get_channel_key(message)
     user_id = str(message.author.id)
-    display_name = message.author.display_name
+    display_name = get_display_name(message.author)
+
+    channel_mood[channel_key] = mood_from_text(content)
 
     await upsert_user_profile(user_id, display_name)
-    await save_message(channel_id, user_id, "user", content)
+    await save_message(channel_key, user_id, "user", content)
 
     async with message.channel.typing():
         try:
-            context = await build_context(channel_id, user_id, display_name)
+            context = await build_context(channel_key, user_id, display_name)
             reply = await ask_ai(context)
-            await save_message(channel_id, user_id, "assistant", reply)
+
+            if channel_mood[channel_key] == "soft":
+                reply = "mrrp… me here with yuw 🥺🐾\n\n" + reply
+            elif channel_mood[channel_key] == "excited":
+                reply += "\n\n*tail wag wag!!* >w< 💖"
+            elif channel_mood[channel_key] == "sleepy":
+                reply += "\n\n*mrrp… eepy fluffy mode* zzz 🐾"
+
+            await save_message(channel_key, user_id, "assistant", reply)
 
             for chunk in split_message(reply):
                 await message.channel.send(
@@ -365,7 +398,7 @@ async def on_message(message: discord.Message):
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
 
-            if random.random() < 0.20:
+            if message.guild is not None and random.random() < 0.20:
                 await message.add_reaction("🐾")
 
         except Exception as e:
