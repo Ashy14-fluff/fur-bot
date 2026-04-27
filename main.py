@@ -4,8 +4,6 @@ import time
 import asyncio
 import traceback
 import random
-from collections import deque
-from difflib import SequenceMatcher
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from typing import Optional, Set, Dict, List
@@ -54,14 +52,14 @@ channel_last_bot_talk: Dict[str, float] = {}
 channel_mood: Dict[str, str] = {}
 
 AUTO_TALK_CHECK_SECONDS = 60
-AUTO_TALK_INTERVAL = 3600
-AUTO_TALK_IDLE_REQUIRED = 3600
+AUTO_TALK_INTERVAL = 18000        # 5 hours
+AUTO_TALK_IDLE_REQUIRED = 18000   # 5 hours of silence before auto message
 
 # ================= ANTI-REPEAT STATE =================
-channel_recent_bot_msgs: Dict[str, deque] = {}
-MAX_RECENT = 8
 SIM_THRESHOLD = 0.78
 MAX_REPEAT_RETRIES = 5
+RECENT_REPEAT_LIMIT = 8
+RECENT_REPEAT_KEEP = 50
 
 # ================= SYSTEM PROMPT =================
 SYSTEM_PROMPT = """
@@ -106,20 +104,20 @@ async def init_db():
             await conn.execute("""
             CREATE TABLE IF NOT EXISTS messages(
                 id BIGSERIAL PRIMARY KEY,
-                channel_id TEXT,
-                user_id TEXT,
-                role TEXT,
-                content TEXT,
-                created_at TIMESTAMPTZ DEFAULT NOW()
+                channel_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
             """)
 
             await conn.execute("""
             CREATE TABLE IF NOT EXISTS user_facts(
                 id BIGSERIAL PRIMARY KEY,
-                user_id TEXT,
-                fact TEXT,
-                created_at TIMESTAMPTZ DEFAULT NOW()
+                user_id TEXT NOT NULL,
+                fact TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
             """)
 
@@ -127,6 +125,30 @@ async def init_db():
             CREATE TABLE IF NOT EXISTS admins(
                 user_id TEXT PRIMARY KEY
             );
+            """)
+
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS bot_message_history(
+                id BIGSERIAL PRIMARY KEY,
+                channel_id TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            """)
+
+            await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_messages_channel_id_id
+            ON messages(channel_id, id DESC);
+            """)
+
+            await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_user_facts_user_id_id
+            ON user_facts(user_id, id DESC);
+            """)
+
+            await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_bot_message_history_channel_id_id
+            ON bot_message_history(channel_id, id DESC);
             """)
 
         print("🟢 DB ready")
@@ -137,6 +159,19 @@ def touch_channel(channel_id: str):
 
 def remember_bot_talk(channel_id: str):
     channel_last_bot_talk[channel_id] = time.monotonic()
+
+def bot_local_dt() -> datetime:
+    return datetime.now(BOT_TZ)
+
+def time_of_day_label(dt: datetime) -> str:
+    h = dt.hour
+    if 5 <= h < 11:
+        return "morning"
+    if 11 <= h < 16:
+        return "afternoon"
+    if 16 <= h < 21:
+        return "evening"
+    return "night"
 
 def mood_from_text(text: str) -> str:
     t = text.lower()
@@ -149,6 +184,20 @@ def mood_from_text(text: str) -> str:
     if any(w in t for w in ["wow", "omg", "haha", "lol", "hehe"]):
         return "playful"
     return "neutral"
+
+def current_live_mood(channel_id: str) -> str:
+    mood = channel_mood.get(channel_id, "neutral")
+    idle = time.monotonic() - channel_last_activity.get(channel_id, time.monotonic())
+
+    if idle > 1800:
+        return "sleepy 😴"
+    if mood == "soft":
+        return "soft 🥺"
+    if mood == "happy":
+        return "happy ✨"
+    if mood == "playful":
+        return "playful >:3"
+    return "neutral 🐾"
 
 def fluff_wrap(reply: str, mood: str) -> str:
     if not reply:
@@ -191,49 +240,9 @@ def is_bot_reply(message: discord.Message) -> bool:
     author = getattr(resolved, "author", None)
     return bool(author and bot.user and author.id == bot.user.id)
 
-def bot_local_dt() -> datetime:
-    return datetime.now(BOT_TZ)
-
-def time_of_day_label(dt: datetime) -> str:
-    h = dt.hour
-    if 5 <= h < 11:
-        return "morning"
-    if 11 <= h < 16:
-        return "afternoon"
-    if 16 <= h < 21:
-        return "evening"
-    return "night"
-
-def current_live_mood(channel_id: str) -> str:
-    mood = channel_mood.get(channel_id, "neutral")
-    idle = time.monotonic() - channel_last_activity.get(channel_id, time.monotonic())
-
-    if idle > 1800:
-        return "sleepy 😴"
-    if mood == "soft":
-        return "soft 🥺"
-    if mood == "happy":
-        return "happy ✨"
-    if mood == "playful":
-        return "playful >:3"
-    return "neutral 🐾"
-
-def remember_bot_message(channel_id: str, msg: str):
-    if channel_id not in channel_recent_bot_msgs:
-        channel_recent_bot_msgs[channel_id] = deque(maxlen=MAX_RECENT)
-    channel_recent_bot_msgs[channel_id].append(msg)
-
 def similarity(a: str, b: str) -> float:
+    from difflib import SequenceMatcher
     return SequenceMatcher(None, a.lower().strip(), b.lower().strip()).ratio()
-
-def is_repetitive(channel_id: str, new_msg: str) -> bool:
-    history = channel_recent_bot_msgs.get(channel_id)
-    if not history:
-        return False
-    for old in history:
-        if similarity(old, new_msg) >= SIM_THRESHOLD:
-            return True
-    return False
 
 async def send_interaction(interaction: discord.Interaction, content: str, *, ephemeral: bool = False):
     if interaction.response.is_done():
@@ -378,20 +387,67 @@ async def ask_ai(messages: List[dict]) -> str:
         print("GROQ ERROR:", repr(e))
         return "mrrp~ something broke 🥺"
 
+async def load_recent_bot_messages(channel_id: str, limit: int = RECENT_REPEAT_LIMIT) -> List[str]:
+    try:
+        async with db.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT content
+                FROM bot_message_history
+                WHERE channel_id=$1
+                ORDER BY id DESC
+                LIMIT $2
+                """,
+                channel_id, limit
+            )
+        return [r["content"] for r in reversed(rows)]
+    except Exception as e:
+        print("BOT HISTORY LOAD ERROR:", repr(e))
+        return []
+
+async def save_bot_message_history(channel_id: str, content: str):
+    try:
+        async with db.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO bot_message_history(channel_id, content) VALUES($1, $2)",
+                channel_id, content[:2000]
+            )
+
+            await conn.execute(
+                """
+                DELETE FROM bot_message_history
+                WHERE id IN (
+                    SELECT id FROM bot_message_history
+                    WHERE channel_id = $1
+                    ORDER BY id DESC
+                    OFFSET $2
+                )
+                """,
+                channel_id, RECENT_REPEAT_KEEP
+            )
+    except Exception as e:
+        print("BOT HISTORY SAVE ERROR:", repr(e))
+
+async def is_repetitive(channel_id: str, new_msg: str) -> bool:
+    history = await load_recent_bot_messages(channel_id, RECENT_REPEAT_LIMIT)
+    for old in history:
+        if similarity(old, new_msg) >= SIM_THRESHOLD:
+            return True
+    return False
+
 async def ask_ai_unique(messages: List[dict], channel_id: str) -> str:
     for _ in range(MAX_REPEAT_RETRIES):
         candidate = await ask_ai(messages)
         candidate = fluff_wrap(candidate, channel_mood.get(channel_id, "neutral"))
-        if not is_repetitive(channel_id, candidate):
+        if not await is_repetitive(channel_id, candidate):
             return candidate
 
-    fallback = random.choice([
+    return random.choice([
         "mrrp~ anyone still here? 🐾",
         "nyah~ it got quiet again…",
         "purr… me still wagging tail in here 🐾",
         "mrrp~ silence is kinda cozy too, but me’s here >w<",
     ])
-    return fallback
 
 # ================= CONTEXT =================
 async def build_context(channel_id: str, user_id: str, username: str) -> List[dict]:
@@ -541,7 +597,7 @@ async def ask_cmd(interaction: discord.Interaction, prompt: str):
         reply = await ask_ai_unique(context, channel_id)
 
         await save_message(channel_id, user_id, "assistant", reply)
-        remember_bot_message(channel_id, reply)
+        await save_bot_message_history(channel_id, reply)
         remember_bot_talk(channel_id)
 
         for i in range(0, len(reply), 1900):
@@ -586,6 +642,7 @@ async def status_cmd(interaction: discord.Interaction):
         msg_count = await conn.fetchval("SELECT COUNT(*) FROM messages")
         admin_count = await conn.fetchval("SELECT COUNT(*) FROM admins")
         fact_count = await conn.fetchval("SELECT COUNT(*) FROM user_facts")
+        bot_hist_count = await conn.fetchval("SELECT COUNT(*) FROM bot_message_history")
 
     channel_id = str(interaction.channel_id or interaction.user.id)
     now_dt = bot_local_dt()
@@ -594,10 +651,11 @@ async def status_cmd(interaction: discord.Interaction):
     embed.add_field(name="Messages", value=str(msg_count), inline=True)
     embed.add_field(name="Admins", value=str(admin_count), inline=True)
     embed.add_field(name="Facts", value=str(fact_count), inline=True)
+    embed.add_field(name="Bot history", value=str(bot_hist_count), inline=True)
     embed.add_field(name="Model", value=MODEL, inline=False)
     embed.add_field(name="Mood", value=current_live_mood(channel_id), inline=False)
     embed.add_field(name="Bot time", value=f"{now_dt.strftime('%H:%M')} ({time_of_day_label(now_dt)})", inline=False)
-    embed.add_field(name="Mode", value="clean hourly furry system", inline=False)
+    embed.add_field(name="Mode", value="5-hour quiet auto message", inline=False)
 
     await interaction.followup.send(embed=embed)
 
@@ -658,7 +716,7 @@ async def auto_talk_loop():
                 msg = await ask_ai_unique(prompt, channel_id)
 
                 await ch.send(msg, allowed_mentions=discord.AllowedMentions.none())
-                remember_bot_message(channel_id, msg)
+                await save_bot_message_history(channel_id, msg)
                 remember_bot_talk(channel_id)
 
             except Exception as e:
@@ -707,7 +765,7 @@ async def on_message(message: discord.Message):
             reply = await ask_ai_unique(context, channel_id)
 
             await save_message(channel_id, user_id, "assistant", reply)
-            remember_bot_message(channel_id, reply)
+            await save_bot_message_history(channel_id, reply)
             remember_bot_talk(channel_id)
 
             for i in range(0, len(reply), 1900):
