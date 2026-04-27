@@ -78,7 +78,7 @@ Examples:
 - "mrrp~ what are you doing? >w<"
 - "uwu me is happy todayy 🐾✨"
 - "hehe~ it got quiet… anyone here? :3"
-- "nyah~ don’t be sad, me is here for you 🥺"
+- "nyah~ don't be sad, me is here for you 🥺"
 
 Rules:
 - Always warm, emotional, playful
@@ -109,68 +109,73 @@ async def init_db():
         if db:
             return
 
-        db = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
+        try:
+            db = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
 
-        async with db.acquire() as conn:
-            await conn.execute("""
-            CREATE TABLE IF NOT EXISTS messages(
-                id BIGSERIAL PRIMARY KEY,
-                channel_id TEXT NOT NULL,
-                user_id TEXT NOT NULL,
-                role TEXT NOT NULL,
-                content TEXT NOT NULL,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            );
-            """)
+            async with db.acquire() as conn:
+                await conn.execute("""
+                CREATE TABLE IF NOT EXISTS messages(
+                    id BIGSERIAL PRIMARY KEY,
+                    channel_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                """)
 
-            await conn.execute("""
-            CREATE TABLE IF NOT EXISTS user_facts(
-                id BIGSERIAL PRIMARY KEY,
-                user_id TEXT NOT NULL,
-                fact TEXT NOT NULL,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            );
-            """)
+                await conn.execute("""
+                CREATE TABLE IF NOT EXISTS user_facts(
+                    id BIGSERIAL PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    fact TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                """)
 
-            await conn.execute("""
-            CREATE TABLE IF NOT EXISTS admins(
-                user_id TEXT PRIMARY KEY
-            );
-            """)
+                await conn.execute("""
+                CREATE TABLE IF NOT EXISTS admins(
+                    user_id TEXT PRIMARY KEY
+                );
+                """)
 
-            await conn.execute("""
-            CREATE TABLE IF NOT EXISTS bot_message_history(
-                id BIGSERIAL PRIMARY KEY,
-                channel_id TEXT NOT NULL,
-                content TEXT NOT NULL,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            );
-            """)
+                await conn.execute("""
+                CREATE TABLE IF NOT EXISTS bot_message_history(
+                    id BIGSERIAL PRIMARY KEY,
+                    channel_id TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                """)
 
-            await conn.execute("""
-            CREATE TABLE IF NOT EXISTS guild_settings(
-                guild_id TEXT PRIMARY KEY,
-                admin_role_id TEXT,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            );
-            """)
+                await conn.execute("""
+                CREATE TABLE IF NOT EXISTS guild_settings(
+                    guild_id TEXT PRIMARY KEY,
+                    admin_role_id TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                """)
 
-            await conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_messages_channel_id_id
-            ON messages(channel_id, id DESC);
-            """)
+                await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_messages_channel_id_id
+                ON messages(channel_id, id DESC);
+                """)
 
-            await conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_user_facts_user_id_id
-            ON user_facts(user_id, id DESC);
-            """)
+                await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_user_facts_user_id_id
+                ON user_facts(user_id, id DESC);
+                """)
 
-            await conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_bot_message_history_channel_id_id
-            ON bot_message_history(channel_id, id DESC);
-            """)
+                await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_bot_message_history_channel_id_id
+                ON bot_message_history(channel_id, id DESC);
+                """)
 
-        print("🟢 DB ready")
+            print("🟢 DB ready")
+        except Exception as e:
+            print(f"DB INIT ERROR: {repr(e)}")
+            db = None
+            raise
 
 # ================= HELPERS =================
 def touch_channel(channel_id: str):
@@ -256,7 +261,7 @@ def fluffy_english_filter(text: str) -> str:
         r"\bgood evening\b": "gud evenin~",
         r"\bwhat are you doing\b": "whatchu doin~?",
         r"\bi am\b": "me is",
-        r"\bi'm\b": "me’s",
+        r"\bi'm\b": "me's",
         r"\byou\b": "yuw",
         r"\bare you\b": "yuw",
         r"\bthank you\b": "thank chu~ 💕",
@@ -292,6 +297,9 @@ def get_typing_delay(text: str) -> float:
     return min(max(len(text) / 25.0, 0.8), 3.5)
 
 async def send_with_typing(channel: discord.abc.Messageable, text: str):
+    if not text or not text.strip():
+        return
+
     delay = get_typing_delay(text)
     async with channel.typing():
         await asyncio.sleep(delay)
@@ -302,6 +310,9 @@ async def send_with_typing(channel: discord.abc.Messageable, text: str):
             await channel.send(chunk, allowed_mentions=discord.AllowedMentions.none())
 
 async def send_followup_with_typing(interaction: discord.Interaction, text: str):
+    if not text or not text.strip():
+        return
+
     delay = get_typing_delay(text)
     if interaction.channel is not None:
         async with interaction.channel.typing():
@@ -598,7 +609,7 @@ async def ask_ai_unique(messages: List[dict], channel_id: str) -> str:
         "mrrp~ anyone still here? 🐾",
         "hehe~ it got quiet again…",
         "purr… me still wagging tail in here 🐾",
-        "mrrp~ silence is kinda cozy too, but me’s here >w<",
+        "mrrp~ silence is kinda cozy too, but me's here >w<",
     ])
 
 # ================= CONTEXT =================
@@ -637,7 +648,7 @@ async def memory_remember(interaction: discord.Interaction, fact: str):
 async def memory_facts(interaction: discord.Interaction):
     facts_list = await load_facts(str(interaction.user.id), limit=10)
     if not facts_list:
-        await send_interaction(interaction, "mrrp~ me don’t know any facts about yuw yet 🥺", ephemeral=True)
+        await send_interaction(interaction, "mrrp~ me don't know any facts about yuw yet 🥺", ephemeral=True)
         return
     text = "\n".join(f"• {f}" for f in facts_list)
     await send_interaction(interaction, f"mrrp~ what me remember about yuw:\n{text}", ephemeral=True)
@@ -662,7 +673,7 @@ async def admin_add(interaction: discord.Interaction, member: discord.Member):
 
     async with db.acquire() as conn:
         await conn.execute(
-            "INSERT INTO admins(user_id) VALUES($1) ON CONFLICT DO NOTHING",
+            "INSERT INTO admins(user_id) VALUES($1) ON CONFLICT (user_id) DO NOTHING",
             str(member.id)
         )
 
@@ -898,9 +909,6 @@ async def auto_talk_loop():
                 continue
 
             if not ch.permissions_for(me).send_messages:
-                continue
-
-            if time.monotonic() - channel_last_activity.get(channel_id, 0) < AUTO_TALK_IDLE_REQUIRED:
                 continue
 
             mood = channel_mood.get(channel_id, "neutral")
