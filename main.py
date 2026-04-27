@@ -38,6 +38,7 @@ groq = Groq(api_key=GROQ_API_KEY)
 # ================= BOT =================
 intents = discord.Intents.default()
 intents.message_content = True
+intents.presences = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 db: Optional[asyncpg.Pool] = None
@@ -54,6 +55,9 @@ channel_mood: Dict[str, str] = {}
 AUTO_TALK_CHECK_SECONDS = 60
 AUTO_TALK_INTERVAL = 18000        # 5 hours
 AUTO_TALK_IDLE_REQUIRED = 18000   # 5 hours of silence before auto message
+
+# ================= STATUS LOOP =================
+STATUS_UPDATE_SECONDS = 120
 
 # ================= ANTI-REPEAT STATE =================
 SIM_THRESHOLD = 0.78
@@ -838,6 +842,33 @@ async def status_cmd(interaction: discord.Interaction):
 
     await interaction.followup.send(embed=embed)
 
+# ================= STATUS LOOP =================
+def build_presence_activity() -> discord.BaseActivity:
+    active_moods = [m for m in channel_mood.values() if m]
+    mood = random.choice(active_moods) if active_moods else "neutral"
+
+    if mood == "happy":
+        return discord.Activity(type=discord.ActivityType.watching, name="yuw and wagging tail happily 🐾✨")
+    if mood == "soft":
+        return discord.Activity(type=discord.ActivityType.listening, name="soft vibes and comforting yuw 🥺")
+    if mood == "sleepy":
+        return discord.Game(name="eepy mode zzz 😴")
+    if mood == "playful":
+        return discord.Game(name="being chaotic >:3")
+    return discord.Activity(type=discord.ActivityType.watching, name="yuw chat >w<")
+
+async def status_loop():
+    await bot.wait_until_ready()
+
+    while not bot.is_closed():
+        try:
+            activity = build_presence_activity()
+            await bot.change_presence(status=discord.Status.online, activity=activity)
+        except Exception as e:
+            print("STATUS LOOP ERROR:", repr(e))
+
+        await asyncio.sleep(STATUS_UPDATE_SECONDS)
+
 # ================= AUTO TALK =================
 async def auto_talk_loop():
     await bot.wait_until_ready()
@@ -979,6 +1010,10 @@ async def on_ready():
     if not getattr(bot, "_auto_talk_started", False):
         bot.loop.create_task(auto_talk_loop())
         bot._auto_talk_started = True
+
+    if not getattr(bot, "_status_started", False):
+        bot.loop.create_task(status_loop())
+        bot._status_started = True
 
     print(f"🐾 Bot ready as {bot.user} | admins: {len(admins)}")
 
