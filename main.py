@@ -903,8 +903,9 @@ async def auto_talk_loop():
                 continue
 
             me = ch.guild.me
-            if me is None and bot.user is not None:
-                me = ch.guild.get_member(bot.user.id)
+            if me is None:
+                if bot.user is not None:
+                    me = ch.guild.get_member(bot.user.id)
             if me is None:
                 continue
 
