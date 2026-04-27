@@ -2,7 +2,6 @@ import os
 import re
 import time
 import asyncio
-import random
 import traceback
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -33,7 +32,6 @@ except Exception:
     BOT_TZ = ZoneInfo("UTC")
 
 SLASH_GUILD_ID = int(GUILD_ID) if GUILD_ID and GUILD_ID.isdigit() else None
-
 groq = Groq(api_key=GROQ_API_KEY)
 
 # ================= BOT =================
@@ -53,13 +51,8 @@ channel_last_bot_talk: Dict[str, float] = {}
 channel_mood: Dict[str, str] = {}
 
 AUTO_TALK_CHECK_SECONDS = 60
-AUTO_TALK_IDLE_SECONDS = 600
-AUTO_TALK_BOT_COOLDOWN = 900
-AUTO_TALK_PROBABILITY = 0.18
-
-SPONTANEOUS_REPLY_PROB = 0.10
-SPONTANEOUS_IDLE_WINDOW = 900
-SPONTANEOUS_BOT_COOLDOWN = 240
+AUTO_TALK_INTERVAL = 3600        # 1 hour between auto messages
+AUTO_TALK_IDLE_REQUIRED = 3600   # 1 hour of silence before auto message
 
 # ================= SYSTEM PROMPT =================
 SYSTEM_PROMPT = """
@@ -360,15 +353,18 @@ async def ask_ai(messages: List[dict]) -> str:
         return "mrrp~ something broke 🥺"
 
 # ================= CONTEXT =================
-async def build_context(channel_id: str, user_id: str, username: str, spontaneous: bool = False) -> List[dict]:
+async def build_context(channel_id: str, user_id: str, username: str) -> List[dict]:
     history = await load_history(channel_id, limit=20)
     facts = await load_facts(user_id, limit=10)
     mood = channel_mood.get(channel_id, "neutral")
+    now_dt = bot_local_dt()
+    tod = time_of_day_label(now_dt)
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "system", "content": f"Current mood: {mood}"},
         {"role": "system", "content": f"Talking to {username}."},
+        {"role": "system", "content": f"The bot local time is {now_dt.strftime('%H:%M')} ({tod})."},
         {"role": "system", "content": "You are currently in FURRY MODE. Do NOT break character under any circumstance."},
     ]
 
@@ -376,22 +372,6 @@ async def build_context(channel_id: str, user_id: str, username: str, spontaneou
         messages.append({
             "role": "system",
             "content": "Important memory about this user:\n- " + "\n- ".join(facts)
-        })
-
-    if spontaneous:
-        now_dt = bot_local_dt()
-        tod = time_of_day_label(now_dt)
-        messages.append({
-            "role": "system",
-            "content": (
-                f"The bot local time is {now_dt.strftime('%H:%M')} ({tod}). "
-                "Never use a greeting that conflicts with the time. "
-                "If it is night, use cozy/sleepy vibes. If morning, use morning vibes."
-            )
-        })
-        messages.append({
-            "role": "system",
-            "content": "You started the message because the chat is quiet. Keep it short, cute, and natural."
         })
 
     messages.extend(history)
@@ -516,7 +496,7 @@ async def ask_cmd(interaction: discord.Interaction, prompt: str):
         if fact := extract_fact(user_text):
             await save_fact_if_new(user_id, fact)
 
-        context = await build_context(channel_id, user_id, username, spontaneous=False)
+        context = await build_context(channel_id, user_id, username)
         reply = await ask_ai(context)
         reply = fluff_wrap(reply, channel_mood.get(channel_id, "neutral"))
 
@@ -576,7 +556,7 @@ async def status_cmd(interaction: discord.Interaction):
     embed.add_field(name="Model", value=MODEL, inline=False)
     embed.add_field(name="Mood", value=current_live_mood(channel_id), inline=False)
     embed.add_field(name="Bot time", value=f"{now_dt.strftime('%H:%M')} ({time_of_day_label(now_dt)})", inline=False)
-    embed.add_field(name="Mode", value="full slash furry system", inline=False)
+    embed.add_field(name="Mode", value="clean hourly furry system", inline=False)
 
     await interaction.followup.send(embed=embed)
 
@@ -588,15 +568,14 @@ async def auto_talk_loop():
         await asyncio.sleep(AUTO_TALK_CHECK_SECONDS)
 
         now = time.monotonic()
-        candidates = []
 
         for channel_id, last_seen in list(channel_last_activity.items()):
             idle = now - last_seen
-            bot_idle = now - channel_last_bot_talk.get(channel_id, 0)
+            last_bot = channel_last_bot_talk.get(channel_id, 0)
 
-            if idle < AUTO_TALK_IDLE_SECONDS:
+            if idle < AUTO_TALK_IDLE_REQUIRED:
                 continue
-            if bot_idle < AUTO_TALK_BOT_COOLDOWN:
+            if now - last_bot < AUTO_TALK_INTERVAL:
                 continue
 
             ch = bot.get_channel(int(channel_id))
@@ -612,44 +591,37 @@ async def auto_talk_loop():
             if not ch.permissions_for(me).send_messages:
                 continue
 
-            candidates.append(ch)
+            # double-check right before sending
+            if time.monotonic() - channel_last_activity.get(channel_id, 0) < AUTO_TALK_IDLE_REQUIRED:
+                continue
 
-        if not candidates:
-            continue
+            mood = channel_mood.get(channel_id, "neutral")
+            now_dt = bot_local_dt()
+            tod = time_of_day_label(now_dt)
 
-        if random.random() > AUTO_TALK_PROBABILITY:
-            continue
+            try:
+                prompt = [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "system", "content": f"Current mood: {mood}"},
+                    {
+                        "role": "system",
+                        "content": (
+                            f"The bot local time is {now_dt.strftime('%H:%M')} ({tod}). "
+                            "Never say a greeting that conflicts with the time. "
+                            "If it is night, use cozy/sleepy vibes. If morning, use morning vibes."
+                        )
+                    },
+                    {"role": "user", "content": "Say one short fluffy message to gently start the chat again."}
+                ]
 
-        channel = random.choice(candidates)
-        channel_id = str(channel.id)
-        mood = channel_mood.get(channel_id, "neutral")
-        now_dt = bot_local_dt()
-        tod = time_of_day_label(now_dt)
+                msg = await ask_ai(prompt)
+                msg = fluff_wrap(msg, mood)
 
-        try:
-            prompt = [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "system", "content": f"Current mood: {mood}"},
-                {
-                    "role": "system",
-                    "content": (
-                        f"The bot local time is {now_dt.strftime('%H:%M')} ({tod}). "
-                        "Never say a greeting that conflicts with the time. "
-                        "If it is night, use cozy/sleepy vibes. If morning, use morning vibes."
-                    )
-                },
-                {"role": "system", "content": "You are reviving a quiet Discord chat. Keep it short, cute, and natural."},
-                {"role": "user", "content": "Say one short fluffy message to gently start the chat again."}
-            ]
+                await ch.send(msg, allowed_mentions=discord.AllowedMentions.none())
+                remember_bot_talk(channel_id)
 
-            msg = await ask_ai(prompt)
-            msg = fluff_wrap(msg, mood)
-
-            await channel.send(msg, allowed_mentions=discord.AllowedMentions.none())
-            remember_bot_talk(channel_id)
-
-        except Exception as e:
-            print("AUTO TALK ERROR:", repr(e))
+            except Exception as e:
+                print("AUTO TALK ERROR:", repr(e))
 
 # ================= CHAT =================
 @bot.event
@@ -663,7 +635,6 @@ async def on_message(message: discord.Message):
     channel_id = str(message.channel.id)
     user_id = str(message.author.id)
     username = message.author.display_name
-    now = time.monotonic()
 
     touch_channel(channel_id)
 
@@ -677,19 +648,7 @@ async def on_message(message: discord.Message):
     is_mention = bot.user is not None and bot.user.mentioned_in(message)
     reply_to_bot = is_bot_reply(message)
 
-    spontaneous = False
-    should_reply = is_dm or is_mention or reply_to_bot
-
-    if not should_reply and not is_dm:
-        idle = now - channel_last_activity.get(channel_id, now)
-        bot_idle = now - channel_last_bot_talk.get(channel_id, 0)
-
-        if idle < SPONTANEOUS_IDLE_WINDOW and bot_idle > SPONTANEOUS_BOT_COOLDOWN:
-            if random.random() < SPONTANEOUS_REPLY_PROB:
-                should_reply = True
-                spontaneous = True
-
-    if not should_reply:
+    if not (is_dm or is_mention or reply_to_bot):
         return
 
     user_text = strip_trigger_text(message) if (is_dm or is_mention) else message.content.strip()
@@ -703,7 +662,7 @@ async def on_message(message: discord.Message):
             await save_fact_if_new(user_id, fact)
 
         async with message.channel.typing():
-            context = await build_context(channel_id, user_id, username, spontaneous=spontaneous)
+            context = await build_context(channel_id, user_id, username)
             reply = await ask_ai(context)
             reply = fluff_wrap(reply, channel_mood.get(channel_id, "neutral"))
 
