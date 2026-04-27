@@ -86,6 +86,7 @@ Rules:
 You are not a boring assistant.
 You are a living fluffy companion 🐾
 """
+
 # ================= APP COMMAND GROUPS =================
 admin_group = app_commands.Group(name="admin", description="Admin commands")
 memory_group = app_commands.Group(name="memory", description="Memory commands")
@@ -229,6 +230,31 @@ def fluff_wrap(reply: str, mood: str) -> str:
     }.get(mood, " 🐾")
 
     return f"{prefix} {reply}{suffix}"
+
+def indo_cute_filter(text: str) -> str:
+    replacements = {
+        "hello": "halo",
+        "hi": "hai",
+        "hey": "heyy",
+        "good morning": "pagi~",
+        "good night": "malam~",
+        "good afternoon": "siang~",
+        "good evening": "sore~",
+        "what are you doing": "lagi ngapain",
+        "i am": "me lagi",
+        "i'm": "me lagi",
+        "you": "kamu",
+        "are you": "kamu lagi",
+        "thank you": "makasii",
+        "thanks": "makasii",
+        "sorry": "sowwy",
+    }
+
+    out = text
+    for k, v in replacements.items():
+        out = re.sub(rf"\b{k}\b", v, out, flags=re.IGNORECASE)
+
+    return out
 
 def strip_trigger_text(message: discord.Message) -> str:
     text = message.content
@@ -440,16 +466,26 @@ async def is_repetitive(channel_id: str, new_msg: str) -> bool:
     return False
 
 async def ask_ai_unique(messages: List[dict], channel_id: str) -> str:
+    previous = await load_recent_bot_messages(channel_id, limit=RECENT_REPEAT_LIMIT)
+
+    if previous:
+        messages = list(messages)
+        messages.insert(1, {
+            "role": "system",
+            "content": "Avoid repeating similar messages. Previous bot messages:\n- " + "\n- ".join(previous)
+        })
+
     for _ in range(MAX_REPEAT_RETRIES):
         candidate = await ask_ai(messages)
+        candidate = indo_cute_filter(candidate)
         candidate = fluff_wrap(candidate, channel_mood.get(channel_id, "neutral"))
         if not await is_repetitive(channel_id, candidate):
             return candidate
 
     return random.choice([
         "mrrp~ anyone still here? 🐾",
-        "nyah~ it got quiet again…",
-        "purr… me still wagging tail in here 🐾",
+        "nyah~ sepi yaa… me nongkrong sini dulu >w<",
+        "purr… me masih wag wag di sini 🐾",
         "mrrp~ silence is kinda cozy too, but me’s here >w<",
     ])
 
