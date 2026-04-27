@@ -65,7 +65,7 @@ RECENT_REPEAT_KEEP = 50
 SYSTEM_PROMPT = """
 You are Fur Bot 🐾, a soft fluffy furry companion.
 
-You ALWAYS speak in cute furry English style.
+You ALWAYS speak in cute fluffy English style.
 
 Examples:
 - "mrrp~ what are you doing? >w<"
@@ -230,31 +230,6 @@ def fluff_wrap(reply: str, mood: str) -> str:
 
     return f"{prefix} {reply}{suffix}"
 
-def indo_cute_filter(text: str) -> str:
-    replacements = {
-        "hello": "halo",
-        "hi": "hai",
-        "hey": "heyy",
-        "good morning": "pagi~",
-        "good night": "malam~",
-        "good afternoon": "siang~",
-        "good evening": "sore~",
-        "what are you doing": "lagi ngapain",
-        "i am": "me lagi",
-        "i'm": "me lagi",
-        "you": "kamu",
-        "are you": "kamu lagi",
-        "thank you": "makasii",
-        "thanks": "makasii",
-        "sorry": "sowwy",
-    }
-
-    out = text
-    for k, v in replacements.items():
-        out = re.sub(rf"\b{k}\b", v, out, flags=re.IGNORECASE)
-
-    return out
-
 def strip_trigger_text(message: discord.Message) -> str:
     text = message.content
     if bot.user:
@@ -272,6 +247,19 @@ def is_bot_reply(message: discord.Message) -> bool:
 def similarity(a: str, b: str) -> float:
     from difflib import SequenceMatcher
     return SequenceMatcher(None, a.lower().strip(), b.lower().strip()).ratio()
+
+def get_typing_delay(text: str) -> float:
+    return min(max(len(text) / 25.0, 0.8), 3.5)
+
+async def send_with_typing(channel: discord.abc.Messageable, text: str):
+    delay = get_typing_delay(text)
+    async with channel.typing():
+        await asyncio.sleep(delay)
+
+    for i in range(0, len(text), 1900):
+        chunk = text[i:i + 1900].strip()
+        if chunk:
+            await channel.send(chunk, allowed_mentions=discord.AllowedMentions.none())
 
 async def send_interaction(interaction: discord.Interaction, content: str, *, ephemeral: bool = False):
     if interaction.response.is_done():
@@ -476,15 +464,14 @@ async def ask_ai_unique(messages: List[dict], channel_id: str) -> str:
 
     for _ in range(MAX_REPEAT_RETRIES):
         candidate = await ask_ai(messages)
-        candidate = indo_cute_filter(candidate)
         candidate = fluff_wrap(candidate, channel_mood.get(channel_id, "neutral"))
         if not await is_repetitive(channel_id, candidate):
             return candidate
 
     return random.choice([
         "mrrp~ anyone still here? 🐾",
-        "nyah~ sepi yaa… me nongkrong sini dulu >w<",
-        "purr… me masih wag wag di sini 🐾",
+        "hehe~ it got quiet again…",
+        "purr… me still wagging tail in here 🐾",
         "mrrp~ silence is kinda cozy too, but me’s here >w<",
     ])
 
@@ -639,10 +626,7 @@ async def ask_cmd(interaction: discord.Interaction, prompt: str):
         await save_bot_message_history(channel_id, reply)
         remember_bot_talk(channel_id)
 
-        for i in range(0, len(reply), 1900):
-            chunk = reply[i:i+1900].strip()
-            if chunk:
-                await interaction.followup.send(chunk, allowed_mentions=discord.AllowedMentions.none())
+        await send_with_typing(interaction.followup, reply)
 
     except Exception:
         print(traceback.format_exc())
@@ -729,7 +713,6 @@ async def auto_talk_loop():
             if not ch.permissions_for(me).send_messages:
                 continue
 
-            # double-check right before sending
             if time.monotonic() - channel_last_activity.get(channel_id, 0) < AUTO_TALK_IDLE_REQUIRED:
                 continue
 
@@ -807,10 +790,7 @@ async def on_message(message: discord.Message):
             await save_bot_message_history(channel_id, reply)
             remember_bot_talk(channel_id)
 
-            for i in range(0, len(reply), 1900):
-                chunk = reply[i:i+1900].strip()
-                if chunk:
-                    await message.channel.send(chunk, allowed_mentions=discord.AllowedMentions.none())
+            await send_with_typing(message.channel, reply)
 
     except Exception:
         print(traceback.format_exc())
