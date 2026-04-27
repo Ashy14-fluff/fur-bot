@@ -61,6 +61,9 @@ MAX_REPEAT_RETRIES = 5
 RECENT_REPEAT_LIMIT = 8
 RECENT_REPEAT_KEEP = 50
 
+# ================= ADMIN ROLE =================
+ADMIN_ROLE_NAME = "Fur Admin 🐾"
+
 # ================= SYSTEM PROMPT =================
 SYSTEM_PROMPT = """
 You are Fur Bot 🐾, a soft fluffy furry companion.
@@ -136,6 +139,14 @@ async def init_db():
                 id BIGSERIAL PRIMARY KEY,
                 channel_id TEXT NOT NULL,
                 content TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            """)
+
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS guild_settings(
+                guild_id TEXT PRIMARY KEY,
+                admin_role_id TEXT,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
             """)
@@ -230,6 +241,31 @@ def fluff_wrap(reply: str, mood: str) -> str:
 
     return f"{prefix} {reply}{suffix}"
 
+def indo_cute_filter(text: str) -> str:
+    replacements = {
+        "hello": "halo",
+        "hi": "hai",
+        "hey": "heyy",
+        "good morning": "pagi~",
+        "good night": "malam~",
+        "good afternoon": "siang~",
+        "good evening": "sore~",
+        "what are you doing": "lagi ngapain",
+        "i am": "me lagi",
+        "i'm": "me lagi",
+        "you": "kamu",
+        "are you": "kamu lagi",
+        "thank you": "makasii",
+        "thanks": "makasii",
+        "sorry": "sowwy",
+    }
+
+    out = text
+    for k, v in replacements.items():
+        out = re.sub(rf"\b{k}\b", v, out, flags=re.IGNORECASE)
+
+    return out
+
 def strip_trigger_text(message: discord.Message) -> str:
     text = message.content
     if bot.user:
@@ -260,6 +296,19 @@ async def send_with_typing(channel: discord.abc.Messageable, text: str):
         chunk = text[i:i + 1900].strip()
         if chunk:
             await channel.send(chunk, allowed_mentions=discord.AllowedMentions.none())
+
+async def send_followup_with_typing(interaction: discord.Interaction, text: str):
+    delay = get_typing_delay(text)
+    if interaction.channel is not None:
+        async with interaction.channel.typing():
+            await asyncio.sleep(delay)
+    else:
+        await asyncio.sleep(delay)
+
+    for i in range(0, len(text), 1900):
+        chunk = text[i:i + 1900].strip()
+        if chunk:
+            await interaction.followup.send(chunk, allowed_mentions=discord.AllowedMentions.none())
 
 async def send_interaction(interaction: discord.Interaction, content: str, *, ephemeral: bool = False):
     if interaction.response.is_done():
@@ -361,6 +410,61 @@ def extract_fact(text: str) -> Optional[str]:
                 return f"{label}: {value}"
 
     return None
+
+# ================= GUILD SETTINGS =================
+async def get_guild_admin_role_id(guild_id: int) -> Optional[int]:
+    try:
+        async with db.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT admin_role_id FROM guild_settings WHERE guild_id=$1",
+                str(guild_id)
+            )
+        if row and row["admin_role_id"] and str(row["admin_role_id"]).isdigit():
+            return int(row["admin_role_id"])
+    except Exception as e:
+        print("GUILD SETTINGS LOAD ERROR:", repr(e))
+    return None
+
+async def set_guild_admin_role_id(guild_id: int, role_id: int):
+    try:
+        async with db.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO guild_settings(guild_id, admin_role_id)
+                VALUES($1, $2)
+                ON CONFLICT(guild_id)
+                DO UPDATE SET admin_role_id=$2
+                """,
+                str(guild_id), str(role_id)
+            )
+    except Exception as e:
+        print("GUILD SETTINGS SAVE ERROR:", repr(e))
+
+async def get_admin_role(guild: discord.Guild, create: bool = False) -> Optional[discord.Role]:
+    role_id = await get_guild_admin_role_id(guild.id)
+    if role_id:
+        role = guild.get_role(role_id)
+        if role:
+            return role
+
+    role = discord.utils.get(guild.roles, name=ADMIN_ROLE_NAME)
+    if role:
+        await set_guild_admin_role_id(guild.id, role.id)
+        return role
+
+    if not create:
+        return None
+
+    try:
+        role = await guild.create_role(
+            name=ADMIN_ROLE_NAME,
+            reason="Auto-created admin badge role"
+        )
+        await set_guild_admin_role_id(guild.id, role.id)
+        return role
+    except Exception as e:
+        print("ROLE CREATE ERROR:", repr(e))
+        return None
 
 # ================= ADMIN =================
 async def is_admin(user_id: str):
@@ -464,6 +568,7 @@ async def ask_ai_unique(messages: List[dict], channel_id: str) -> str:
 
     for _ in range(MAX_REPEAT_RETRIES):
         candidate = await ask_ai(messages)
+        candidate = indo_cute_filter(candidate)
         candidate = fluff_wrap(candidate, channel_mood.get(channel_id, "neutral"))
         if not await is_repetitive(channel_id, candidate):
             return candidate
@@ -541,7 +646,24 @@ async def admin_add(interaction: discord.Interaction, member: discord.Member):
         )
 
     admins.add(str(member.id))
-    await send_interaction(interaction, f"mrrp~ {member.display_name} is now admin 🐾", ephemeral=True)
+
+    role_added = False
+    if interaction.guild is not None:
+        role = await get_admin_role(interaction.guild, create=True)
+        if role:
+            try:
+                await member.add_roles(role, reason="Admin added")
+                role_added = True
+            except Exception as e:
+                print("ROLE ADD ERROR:", repr(e))
+
+    msg = f"mrrp~ {member.display_name} is now admin 🐾"
+    if role_added:
+        msg += "\n✨ auto role given!"
+    else:
+        msg += "\n🥺 role not given (check perms / role config)"
+
+    await send_interaction(interaction, msg, ephemeral=True)
 
 @admin_group.command(name="remove", description="Remove a user from admin")
 @app_commands.describe(member="The member to remove")
@@ -553,7 +675,24 @@ async def admin_remove(interaction: discord.Interaction, member: discord.Member)
         await conn.execute("DELETE FROM admins WHERE user_id=$1", str(member.id))
 
     admins.discard(str(member.id))
-    await send_interaction(interaction, f"mrrp~ removed admin {member.display_name} 🐾", ephemeral=True)
+
+    role_removed = False
+    if interaction.guild is not None:
+        role = await get_admin_role(interaction.guild, create=False)
+        if role:
+            try:
+                await member.remove_roles(role, reason="Admin removed")
+                role_removed = True
+            except Exception as e:
+                print("ROLE REMOVE ERROR:", repr(e))
+
+    msg = f"mrrp~ removed admin {member.display_name} 🐾"
+    if role_removed:
+        msg += "\n✨ role removed!"
+    else:
+        msg += "\n🥺 role not removed (missing role / perms)"
+
+    await send_interaction(interaction, msg, ephemeral=True)
 
 @admin_group.command(name="list", description="List admins")
 async def admin_list(interaction: discord.Interaction):
@@ -626,7 +765,7 @@ async def ask_cmd(interaction: discord.Interaction, prompt: str):
         await save_bot_message_history(channel_id, reply)
         remember_bot_talk(channel_id)
 
-        await send_with_typing(interaction.followup, reply)
+        await send_followup_with_typing(interaction, reply)
 
     except Exception:
         print(traceback.format_exc())
