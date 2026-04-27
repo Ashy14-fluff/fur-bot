@@ -3,6 +3,9 @@ import re
 import time
 import asyncio
 import traceback
+import random
+from collections import deque
+from difflib import SequenceMatcher
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from typing import Optional, Set, Dict, List
@@ -51,8 +54,14 @@ channel_last_bot_talk: Dict[str, float] = {}
 channel_mood: Dict[str, str] = {}
 
 AUTO_TALK_CHECK_SECONDS = 60
-AUTO_TALK_INTERVAL = 3600        # 1 hour between auto messages
-AUTO_TALK_IDLE_REQUIRED = 3600   # 1 hour of silence before auto message
+AUTO_TALK_INTERVAL = 3600
+AUTO_TALK_IDLE_REQUIRED = 3600
+
+# ================= ANTI-REPEAT STATE =================
+channel_recent_bot_msgs: Dict[str, deque] = {}
+MAX_RECENT = 8
+SIM_THRESHOLD = 0.78
+MAX_REPEAT_RETRIES = 5
 
 # ================= SYSTEM PROMPT =================
 SYSTEM_PROMPT = """
@@ -209,6 +218,23 @@ def current_live_mood(channel_id: str) -> str:
         return "playful >:3"
     return "neutral 🐾"
 
+def remember_bot_message(channel_id: str, msg: str):
+    if channel_id not in channel_recent_bot_msgs:
+        channel_recent_bot_msgs[channel_id] = deque(maxlen=MAX_RECENT)
+    channel_recent_bot_msgs[channel_id].append(msg)
+
+def similarity(a: str, b: str) -> float:
+    return SequenceMatcher(None, a.lower().strip(), b.lower().strip()).ratio()
+
+def is_repetitive(channel_id: str, new_msg: str) -> bool:
+    history = channel_recent_bot_msgs.get(channel_id)
+    if not history:
+        return False
+    for old in history:
+        if similarity(old, new_msg) >= SIM_THRESHOLD:
+            return True
+    return False
+
 async def send_interaction(interaction: discord.Interaction, content: str, *, ephemeral: bool = False):
     if interaction.response.is_done():
         await interaction.followup.send(
@@ -351,6 +377,21 @@ async def ask_ai(messages: List[dict]) -> str:
     except Exception as e:
         print("GROQ ERROR:", repr(e))
         return "mrrp~ something broke 🥺"
+
+async def ask_ai_unique(messages: List[dict], channel_id: str) -> str:
+    for _ in range(MAX_REPEAT_RETRIES):
+        candidate = await ask_ai(messages)
+        candidate = fluff_wrap(candidate, channel_mood.get(channel_id, "neutral"))
+        if not is_repetitive(channel_id, candidate):
+            return candidate
+
+    fallback = random.choice([
+        "mrrp~ anyone still here? 🐾",
+        "nyah~ it got quiet again…",
+        "purr… me still wagging tail in here 🐾",
+        "mrrp~ silence is kinda cozy too, but me’s here >w<",
+    ])
+    return fallback
 
 # ================= CONTEXT =================
 async def build_context(channel_id: str, user_id: str, username: str) -> List[dict]:
@@ -497,10 +538,10 @@ async def ask_cmd(interaction: discord.Interaction, prompt: str):
             await save_fact_if_new(user_id, fact)
 
         context = await build_context(channel_id, user_id, username)
-        reply = await ask_ai(context)
-        reply = fluff_wrap(reply, channel_mood.get(channel_id, "neutral"))
+        reply = await ask_ai_unique(context, channel_id)
 
         await save_message(channel_id, user_id, "assistant", reply)
+        remember_bot_message(channel_id, reply)
         remember_bot_talk(channel_id)
 
         for i in range(0, len(reply), 1900):
@@ -614,10 +655,10 @@ async def auto_talk_loop():
                     {"role": "user", "content": "Say one short fluffy message to gently start the chat again."}
                 ]
 
-                msg = await ask_ai(prompt)
-                msg = fluff_wrap(msg, mood)
+                msg = await ask_ai_unique(prompt, channel_id)
 
                 await ch.send(msg, allowed_mentions=discord.AllowedMentions.none())
+                remember_bot_message(channel_id, msg)
                 remember_bot_talk(channel_id)
 
             except Exception as e:
@@ -663,10 +704,10 @@ async def on_message(message: discord.Message):
 
         async with message.channel.typing():
             context = await build_context(channel_id, user_id, username)
-            reply = await ask_ai(context)
-            reply = fluff_wrap(reply, channel_mood.get(channel_id, "neutral"))
+            reply = await ask_ai_unique(context, channel_id)
 
             await save_message(channel_id, user_id, "assistant", reply)
+            remember_bot_message(channel_id, reply)
             remember_bot_talk(channel_id)
 
             for i in range(0, len(reply), 1900):
