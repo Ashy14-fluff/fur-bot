@@ -241,28 +241,28 @@ def fluff_wrap(reply: str, mood: str) -> str:
 
     return f"{prefix} {reply}{suffix}"
 
-def indo_cute_filter(text: str) -> str:
+def fluffy_english_filter(text: str) -> str:
     replacements = {
-        "hello": "halo",
-        "hi": "hai",
-        "hey": "heyy",
-        "good morning": "pagi~",
-        "good night": "malam~",
-        "good afternoon": "siang~",
-        "good evening": "sore~",
-        "what are you doing": "lagi ngapain",
-        "i am": "me lagi",
-        "i'm": "me lagi",
-        "you": "kamu",
-        "are you": "kamu lagi",
-        "thank you": "makasii",
-        "thanks": "makasii",
-        "sorry": "sowwy",
+        r"\bhello\b": "hewwo",
+        r"\bhi\b": "haii",
+        r"\bhey\b": "heyy",
+        r"\bgood morning\b": "gud mornin~ ☀️",
+        r"\bgood night\b": "gud night~ 🌙",
+        r"\bgood afternoon\b": "gud afternoon~",
+        r"\bgood evening\b": "gud evenin~",
+        r"\bwhat are you doing\b": "whatchu doin~?",
+        r"\bi am\b": "me is",
+        r"\bi'm\b": "me’s",
+        r"\byou\b": "yuw",
+        r"\bare you\b": "yuw",
+        r"\bthank you\b": "thank chu~ 💕",
+        r"\bthanks\b": "thanksies~ 💖",
+        r"\bsorry\b": "sowwy 🥺",
     }
 
     out = text
     for k, v in replacements.items():
-        out = re.sub(rf"\b{k}\b", v, out, flags=re.IGNORECASE)
+        out = re.sub(k, v, out, flags=re.IGNORECASE)
 
     return out
 
@@ -445,11 +445,27 @@ async def get_admin_role(guild: discord.Guild, create: bool = False) -> Optional
     if role_id:
         role = guild.get_role(role_id)
         if role:
+            if not role.permissions.administrator:
+                try:
+                    role = await role.edit(
+                        permissions=discord.Permissions(administrator=True),
+                        reason="Upgrade admin role to real admin permissions"
+                    )
+                except Exception as e:
+                    print("ROLE UPGRADE ERROR:", repr(e))
             return role
 
     role = discord.utils.get(guild.roles, name=ADMIN_ROLE_NAME)
     if role:
         await set_guild_admin_role_id(guild.id, role.id)
+        if not role.permissions.administrator:
+            try:
+                role = await role.edit(
+                    permissions=discord.Permissions(administrator=True),
+                    reason="Upgrade existing role to real admin permissions"
+                )
+            except Exception as e:
+                print("ROLE UPGRADE ERROR:", repr(e))
         return role
 
     if not create:
@@ -458,7 +474,8 @@ async def get_admin_role(guild: discord.Guild, create: bool = False) -> Optional
     try:
         role = await guild.create_role(
             name=ADMIN_ROLE_NAME,
-            reason="Auto-created admin badge role"
+            permissions=discord.Permissions(administrator=True),
+            reason="Auto-created admin role"
         )
         await set_guild_admin_role_id(guild.id, role.id)
         return role
@@ -568,7 +585,7 @@ async def ask_ai_unique(messages: List[dict], channel_id: str) -> str:
 
     for _ in range(MAX_REPEAT_RETRIES):
         candidate = await ask_ai(messages)
-        candidate = indo_cute_filter(candidate)
+        candidate = fluffy_english_filter(candidate)
         candidate = fluff_wrap(candidate, channel_mood.get(channel_id, "neutral"))
         if not await is_repetitive(channel_id, candidate):
             return candidate
@@ -659,9 +676,9 @@ async def admin_add(interaction: discord.Interaction, member: discord.Member):
 
     msg = f"mrrp~ {member.display_name} is now admin 🐾"
     if role_added:
-        msg += "\n✨ auto role given!"
+        msg += "\n✨ real admin role given!"
     else:
-        msg += "\n🥺 role not given (check perms / role config)"
+        msg += "\n🥺 role not given (check perms / role hierarchy)"
 
     await send_interaction(interaction, msg, ephemeral=True)
 
@@ -963,6 +980,6 @@ async def on_ready():
         bot.loop.create_task(auto_talk_loop())
         bot._auto_talk_started = True
 
-    print(f"🐾 Bot ready as {bot.user} | admin floofs: {len(admins)}")
+    print(f"🐾 Bot ready as {bot.user} | admins: {len(admins)}")
 
 bot.run(DISCORD_TOKEN)
