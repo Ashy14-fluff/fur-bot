@@ -6,7 +6,7 @@ import traceback
 import random
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from typing import Optional, Set, Dict, List, Tuple
+from typing import Optional, Set, Dict, List
 from difflib import SequenceMatcher
 
 import asyncpg
@@ -59,7 +59,7 @@ AUTO_TALK_IDLE_REQUIRED = 18000  # 5 hours of silence before auto message
 AUTO_TALK_RANDOM_MIN = 18000     # 5 hours
 AUTO_TALK_RANDOM_MAX = 28800     # 8 hours
 AUTO_TALK_INITIAL_JITTER = 300   # small random offset after talking
-CLEANUP_STALE_CHANNELS_SECONDS = 3600  # cleanup every hour
+CLEANUP_STALE_CHANNELS_SECONDS = 3600
 STALE_CHANNEL_AGE = 604800  # 7 days
 
 STATUS_UPDATE_SECONDS = 120
@@ -209,9 +209,8 @@ def remember_bot_talk(channel_id: str):
     """Record bot talk and schedule next auto-talk with random jitter."""
     now = time.monotonic()
     channel_last_bot_talk[channel_id] = now
-    # Schedule next auto-talk with random interval between 5-8 hours
     jitter = random.randint(AUTO_TALK_RANDOM_MIN, AUTO_TALK_RANDOM_MAX)
-    channel_next_auto_talk[channel_id] = now + jitter
+    channel_next_auto_talk[channel_id] = now + jitter + random.randint(0, AUTO_TALK_INITIAL_JITTER)
 
 
 def bot_local_dt() -> datetime:
@@ -394,6 +393,20 @@ async def send_interaction(interaction: discord.Interaction, content: str, *, ep
             ephemeral=ephemeral,
             allowed_mentions=discord.AllowedMentions.none()
         )
+
+
+async def get_channel_object(channel_id: str):
+    try:
+        ch = bot.get_channel(int(channel_id))
+        if ch is not None:
+            return ch
+    except Exception:
+        pass
+
+    try:
+        return await bot.fetch_channel(int(channel_id))
+    except Exception:
+        return None
 
 # ================= MEMORY =================
 async def save_message(channel_id: str, user_id: str, role: str, content: str):
@@ -834,7 +847,6 @@ async def get_relationship_score(user_id: str) -> int:
 
 
 async def add_relationship_score(user_id: str, delta: int):
-    """Add delta to relationship score, clamped between MIN and MAX."""
     require_db()
     try:
         async with db.acquire() as conn:
@@ -855,7 +867,6 @@ async def add_relationship_score(user_id: str, delta: int):
 async def set_relationship_score(user_id: str, score: int):
     require_db()
     try:
-        # Clamp score to valid range
         clamped_score = max(RELATIONSHIP_SCORE_MIN, min(RELATIONSHIP_SCORE_MAX, score))
         async with db.acquire() as conn:
             await conn.execute(
@@ -1210,9 +1221,9 @@ async def status_loop():
             print("STATUS LOOP ERROR:", repr(e))
         await asyncio.sleep(STATUS_UPDATE_SECONDS)
 
+
 # ================= CLEANUP LOOP =================
 async def cleanup_stale_channels():
-    """Periodically remove dead channels from tracking dicts to prevent memory leaks."""
     await bot.wait_until_ready()
     while not bot.is_closed():
         try:
@@ -1220,7 +1231,6 @@ async def cleanup_stale_channels():
             now = time.monotonic()
             cutoff = now - STALE_CHANNEL_AGE
 
-            # Clean up stale channel tracking
             stale_channels = [
                 ch_id for ch_id, last_seen in channel_last_activity.items()
                 if last_seen < cutoff
@@ -1253,7 +1263,9 @@ async def auto_talk_loop():
             if not enabled:
                 continue
 
-            me = guild.me or guild.get_member(bot.user.id) if bot.user else None
+            me = guild.me
+            if me is None and bot.user is not None:
+                me = guild.get_member(bot.user.id)
             if not me:
                 continue
 
@@ -1299,12 +1311,7 @@ async def auto_talk_loop():
 
         # ===== DM CHANNELS =====
         for channel_id, last_seen in list(channel_last_activity.items()):
-            try:
-                ch_id = int(channel_id)
-            except ValueError:
-                continue  # Skip invalid channel IDs
-
-            ch = bot.get_channel(ch_id)
+            ch = await get_channel_object(channel_id)
             if ch is None or not isinstance(ch, discord.DMChannel):
                 continue
 
