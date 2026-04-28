@@ -235,6 +235,24 @@ def time_of_day_label(dt: datetime) -> str:
     return "night"
 
 
+def mood_from_text(text: str) -> str:
+    low = text.lower()
+
+    if any(w in low for w in ["sleepy", "tired", "eepy", "zzz", "good night", "night"]):
+        return "sleepy"
+
+    if any(w in low for w in ["sad", "lonely", "hurt", "down", "cry", "depressed"]):
+        return "soft"
+
+    if any(w in low for w in ["play", "game", "chaos", "mischief", "tease", "funny"]):
+        return "playful"
+
+    if any(w in low for w in ["happy", "yay", "excited", "hehe", "uwu", "owo", "love"]):
+        return "happy"
+
+    return "neutral"
+
+
 def time_aware_mood(channel_id: str) -> str:
     """Single mood source used by both /mood and AI context."""
     explicit = channel_mood.get(channel_id, "neutral")
