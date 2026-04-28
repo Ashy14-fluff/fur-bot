@@ -22,6 +22,7 @@ DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 DATABASE_URL = os.getenv("DATABASE_URL")
 MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+MODEL_FALLBACKS_RAW = os.getenv("GROQ_MODEL_FALLBACKS", "")
 GUILD_ID = os.getenv("GUILD_ID")
 BOT_TIMEZONE = os.getenv("BOT_TIMEZONE", "Asia/Jakarta")
 
@@ -36,6 +37,18 @@ except Exception:
 SLASH_GUILD_ID = int(GUILD_ID) if GUILD_ID and GUILD_ID.isdigit() else None
 
 groq = Groq(api_key=GROQ_API_KEY)
+
+
+def build_model_candidates() -> List[str]:
+    candidates = [MODEL]
+    if MODEL_FALLBACKS_RAW.strip():
+        candidates.extend(x.strip() for x in MODEL_FALLBACKS_RAW.split(",") if x.strip())
+
+    # Deduplicate while preserving order
+    return list(dict.fromkeys(candidates))
+
+
+MODEL_CANDIDATES = build_model_candidates()
 
 # ================= BOT =================
 intents = discord.Intents.default()
@@ -204,7 +217,10 @@ async def init_db():
             raise
 
 
-def require_db():
+async def ensure_db_initialized():
+    if db is None:
+        await init_db()
+
     if db is None:
         raise RuntimeError("Database is not initialized")
 
@@ -233,6 +249,24 @@ def time_of_day_label(dt: datetime) -> str:
     if 16 <= h < 21:
         return "evening"
     return "night"
+
+
+def mood_from_text(text: str) -> str:
+    low = text.lower()
+
+    if any(w in low for w in ["sleepy", "tired", "eepy", "zzz", "good night", "night"]):
+        return "sleepy"
+
+    if any(w in low for w in ["sad", "lonely", "hurt", "down", "cry", "depressed"]):
+        return "soft"
+
+    if any(w in low for w in ["play", "game", "chaos", "mischief", "tease", "funny"]):
+        return "playful"
+
+    if any(w in low for w in ["happy", "yay", "excited", "hehe", "uwu", "owo", "love"]):
+        return "happy"
+
+    return "neutral"
 
 
 def time_aware_mood(channel_id: str) -> str:
@@ -422,7 +456,7 @@ async def get_channel_object(channel_id: str):
 
 # ================= MEMORY =================
 async def save_message(channel_id: str, user_id: str, role: str, content: str):
-    require_db()
+    await ensure_db_initialized()
     try:
         async with db.acquire() as conn:
             await conn.execute(
@@ -434,7 +468,7 @@ async def save_message(channel_id: str, user_id: str, role: str, content: str):
 
 
 async def load_history(channel_id: str, limit: int = 20) -> List[dict]:
-    require_db()
+    await ensure_db_initialized()
     try:
         async with db.acquire() as conn:
             rows = await conn.fetch(
@@ -455,7 +489,7 @@ async def load_history(channel_id: str, limit: int = 20) -> List[dict]:
 
 
 async def load_facts(user_id: str, limit: int = 10) -> List[str]:
-    require_db()
+    await ensure_db_initialized()
     try:
         async with db.acquire() as conn:
             rows = await conn.fetch(
@@ -475,7 +509,7 @@ async def load_facts(user_id: str, limit: int = 10) -> List[str]:
 
 
 async def save_fact(user_id: str, fact: str):
-    require_db()
+    await ensure_db_initialized()
     try:
         async with db.acquire() as conn:
             await conn.execute(
@@ -517,7 +551,7 @@ def extract_fact(text: str) -> Optional[str]:
 
 # ================= GUILD SETTINGS =================
 async def ensure_guild_row(guild_id: int):
-    require_db()
+    await ensure_db_initialized()
     try:
         async with db.acquire() as conn:
             await conn.execute(
@@ -533,7 +567,7 @@ async def ensure_guild_row(guild_id: int):
 
 
 async def get_guild_admin_role_id(guild_id: int) -> Optional[int]:
-    require_db()
+    await ensure_db_initialized()
     try:
         async with db.acquire() as conn:
             row = await conn.fetchrow(
@@ -548,7 +582,7 @@ async def get_guild_admin_role_id(guild_id: int) -> Optional[int]:
 
 
 async def set_guild_admin_role_id(guild_id: int, role_id: int):
-    require_db()
+    await ensure_db_initialized()
     try:
         await ensure_guild_row(guild_id)
         async with db.acquire() as conn:
@@ -565,7 +599,7 @@ async def set_guild_admin_role_id(guild_id: int, role_id: int):
 
 
 async def get_autotalk_enabled(guild_id: int) -> bool:
-    require_db()
+    await ensure_db_initialized()
     try:
         await ensure_guild_row(guild_id)
         async with db.acquire() as conn:
@@ -582,7 +616,7 @@ async def get_autotalk_enabled(guild_id: int) -> bool:
 
 
 async def set_autotalk_enabled(guild_id: int, enabled: bool):
-    require_db()
+    await ensure_db_initialized()
     try:
         await ensure_guild_row(guild_id)
         async with db.acquire() as conn:
@@ -646,7 +680,7 @@ async def is_admin(user_id: str):
 
 async def load_admins():
     global admins
-    require_db()
+    await ensure_db_initialized()
     try:
         async with db.acquire() as conn:
             rows = await conn.fetch("SELECT user_id FROM admins")
@@ -664,29 +698,35 @@ async def require_admin(interaction: discord.Interaction) -> bool:
 
 # ================= AI =================
 async def ask_ai(messages: List[dict]) -> str:
-    try:
-        def run():
-            return groq.chat.completions.create(
-                model=MODEL,
-                messages=messages,
-                temperature=0.7,
-                max_tokens=700,
-            ).choices[0].message.content
+    errors = []
 
-        result = await asyncio.wait_for(asyncio.to_thread(run), timeout=30)
-        if not result or not result.strip():
-            return "mrrp~ empty brain moment 🥺"
-        return result.strip()
+    for model_name in MODEL_CANDIDATES:
+        try:
+            def run():
+                return groq.chat.completions.create(
+                    model=model_name,
+                    messages=messages,
+                    temperature=0.7,
+                    max_tokens=700,
+                ).choices[0].message.content
 
-    except asyncio.TimeoutError:
-        return "mrrp… took too long 🥺"
-    except Exception as e:
-        log_error("GROQ", e)
-        return "mrrp~ something broke 🥺"
+            result = await asyncio.wait_for(asyncio.to_thread(run), timeout=30)
+            if result and result.strip():
+                return result.strip()
+            errors.append(f"{model_name}: empty response")
+
+        except asyncio.TimeoutError:
+            errors.append(f"{model_name}: timeout")
+        except Exception as e:
+            log_error(f"GROQ {model_name}", e)
+            errors.append(f"{model_name}: {type(e).__name__}")
+
+    print(f"[GROQ] all model candidates failed: {', '.join(errors)}")
+    return "mrrp~ me had a brain hiccup, can yuw try again in a sec? 🥺🐾"
 
 
 async def load_recent_bot_messages(channel_id: str, limit: int = RECENT_REPEAT_LIMIT) -> List[str]:
-    require_db()
+    await ensure_db_initialized()
     try:
         async with db.acquire() as conn:
             rows = await conn.fetch(
@@ -706,7 +746,7 @@ async def load_recent_bot_messages(channel_id: str, limit: int = RECENT_REPEAT_L
 
 
 async def save_bot_message_history(channel_id: str, content: str):
-    require_db()
+    await ensure_db_initialized()
     try:
         async with db.acquire() as conn:
             await conn.execute(
@@ -827,7 +867,7 @@ async def memory_facts(interaction: discord.Interaction):
 @memory_group.command(name="forgetme", description="Delete your stored memory")
 async def memory_forgetme(interaction: discord.Interaction):
     try:
-        require_db()
+        await ensure_db_initialized()
         async with db.acquire() as conn:
             await conn.execute("DELETE FROM messages WHERE user_id=$1", str(interaction.user.id))
             await conn.execute("DELETE FROM user_facts WHERE user_id=$1", str(interaction.user.id))
@@ -839,7 +879,7 @@ async def memory_forgetme(interaction: discord.Interaction):
 
 # ================= RELATIONSHIP SYSTEM =================
 async def get_relationship_score(user_id: str) -> int:
-    require_db()
+    await ensure_db_initialized()
     try:
         async with db.acquire() as conn:
             row = await conn.fetchrow(
@@ -855,7 +895,7 @@ async def get_relationship_score(user_id: str) -> int:
 
 
 async def add_relationship_score(user_id: str, delta: int):
-    require_db()
+    await ensure_db_initialized()
     try:
         async with db.acquire() as conn:
             await conn.execute(
@@ -873,7 +913,7 @@ async def add_relationship_score(user_id: str, delta: int):
 
 
 async def set_relationship_score(user_id: str, score: int):
-    require_db()
+    await ensure_db_initialized()
     try:
         clamped_score = max(RELATIONSHIP_SCORE_MIN, min(RELATIONSHIP_SCORE_MAX, score))
         async with db.acquire() as conn:
@@ -987,7 +1027,7 @@ async def admin_add(interaction: discord.Interaction, member: discord.Member):
     if not await require_admin(interaction):
         return
 
-    require_db()
+    await ensure_db_initialized()
     async with db.acquire() as conn:
         await conn.execute(
             "INSERT INTO admins(user_id) VALUES($1) ON CONFLICT (user_id) DO NOTHING",
@@ -1023,7 +1063,7 @@ async def admin_remove(interaction: discord.Interaction, member: discord.Member)
     if not await require_admin(interaction):
         return
 
-    require_db()
+    await ensure_db_initialized()
     async with db.acquire() as conn:
         await conn.execute("DELETE FROM admins WHERE user_id=$1", str(member.id))
 
@@ -1083,7 +1123,7 @@ async def admin_clearhistory(interaction: discord.Interaction):
     if not await require_admin(interaction):
         return
     try:
-        require_db()
+        await ensure_db_initialized()
         async with db.acquire() as conn:
             await conn.execute("DELETE FROM messages WHERE channel_id=$1", str(interaction.channel_id))
         await send_interaction(interaction, "mrrp~ history cleared 🧹✨", ephemeral=True)
@@ -1170,7 +1210,7 @@ async def status_cmd(interaction: discord.Interaction):
 
     await interaction.response.defer(thinking=False)
 
-    require_db()
+    await ensure_db_initialized()
     async with db.acquire() as conn:
         msg_count = await conn.fetchval("SELECT COUNT(*) FROM messages")
         admin_count = await conn.fetchval("SELECT COUNT(*) FROM admins")
