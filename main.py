@@ -7,6 +7,7 @@ import random
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from typing import Optional, Set, Dict, List, Tuple
+from difflib import SequenceMatcher
 
 import asyncpg
 import discord
@@ -58,6 +59,8 @@ AUTO_TALK_IDLE_REQUIRED = 18000  # 5 hours of silence before auto message
 AUTO_TALK_RANDOM_MIN = 18000     # 5 hours
 AUTO_TALK_RANDOM_MAX = 28800     # 8 hours
 AUTO_TALK_INITIAL_JITTER = 300   # small random offset after talking
+CLEANUP_STALE_CHANNELS_SECONDS = 3600  # cleanup every hour
+STALE_CHANNEL_AGE = 604800  # 7 days
 
 STATUS_UPDATE_SECONDS = 120
 
@@ -65,6 +68,9 @@ SIM_THRESHOLD = 0.78
 MAX_REPEAT_RETRIES = 5
 RECENT_REPEAT_LIMIT = 8
 RECENT_REPEAT_KEEP = 50
+
+RELATIONSHIP_SCORE_MIN = -100
+RELATIONSHIP_SCORE_MAX = 200
 
 ADMIN_ROLE_NAME = "Fur Admin 🐾"
 
@@ -200,9 +206,12 @@ def touch_channel(channel_id: str):
 
 
 def remember_bot_talk(channel_id: str):
+    """Record bot talk and schedule next auto-talk with random jitter."""
     now = time.monotonic()
     channel_last_bot_talk[channel_id] = now
-    channel_next_auto_talk[channel_id] = now + random.randint(AUTO_TALK_RANDOM_MIN, AUTO_TALK_RANDOM_MAX)
+    # Schedule next auto-talk with random interval between 5-8 hours
+    jitter = random.randint(AUTO_TALK_RANDOM_MIN, AUTO_TALK_RANDOM_MAX)
+    channel_next_auto_talk[channel_id] = now + jitter
 
 
 def bot_local_dt() -> datetime:
@@ -312,7 +321,7 @@ def prevent_bad_mood(reply: str, mood: str) -> str:
         return "mrrp~ me wants to stay gentle and cuddly with yuw 🥺🐾"
 
     if mood == "sleepy" and any(w in low for w in bad_words):
-        return "mrrp... me’s a lil eepy and wants cozy vibes only 💤🐾"
+        return "mrrp... me's a lil eepy and wants cozy vibes only 💤🐾"
 
     return reply
 
@@ -334,7 +343,6 @@ def is_bot_reply(message: discord.Message) -> bool:
 
 
 def similarity(a: str, b: str) -> float:
-    from difflib import SequenceMatcher
     return SequenceMatcher(None, a.lower().strip(), b.lower().strip()).ratio()
 
 
@@ -485,15 +493,18 @@ def extract_fact(text: str) -> Optional[str]:
 # ================= GUILD SETTINGS =================
 async def ensure_guild_row(guild_id: int):
     require_db()
-    async with db.acquire() as conn:
-        await conn.execute(
-            """
-            INSERT INTO guild_settings(guild_id, admin_role_id, autotalk_enabled)
-            VALUES($1, NULL, TRUE)
-            ON CONFLICT(guild_id) DO NOTHING
-            """,
-            str(guild_id)
-        )
+    try:
+        async with db.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO guild_settings(guild_id, admin_role_id, autotalk_enabled)
+                VALUES($1, NULL, TRUE)
+                ON CONFLICT(guild_id) DO NOTHING
+                """,
+                str(guild_id)
+            )
+    except Exception as e:
+        print(f"GUILD ENSURE ERROR: {repr(e)}")
 
 
 async def get_guild_admin_role_id(guild_id: int) -> Optional[int]:
@@ -823,6 +834,7 @@ async def get_relationship_score(user_id: str) -> int:
 
 
 async def add_relationship_score(user_id: str, delta: int):
+    """Add delta to relationship score, clamped between MIN and MAX."""
     require_db()
     try:
         async with db.acquire() as conn:
@@ -831,10 +843,10 @@ async def add_relationship_score(user_id: str, delta: int):
                 INSERT INTO user_relationships(user_id, score, last_updated)
                 VALUES($1, $2, NOW())
                 ON CONFLICT(user_id)
-                DO UPDATE SET score = user_relationships.score + $2,
+                DO UPDATE SET score = GREATEST($3, LEAST($4, user_relationships.score + $2)),
                               last_updated = NOW()
                 """,
-                user_id, delta
+                user_id, delta, RELATIONSHIP_SCORE_MIN, RELATIONSHIP_SCORE_MAX
             )
     except Exception as e:
         print("REL SAVE ERROR:", repr(e))
@@ -843,6 +855,8 @@ async def add_relationship_score(user_id: str, delta: int):
 async def set_relationship_score(user_id: str, score: int):
     require_db()
     try:
+        # Clamp score to valid range
+        clamped_score = max(RELATIONSHIP_SCORE_MIN, min(RELATIONSHIP_SCORE_MAX, score))
         async with db.acquire() as conn:
             await conn.execute(
                 """
@@ -851,7 +865,7 @@ async def set_relationship_score(user_id: str, score: int):
                 ON CONFLICT(user_id)
                 DO UPDATE SET score=$2, last_updated=NOW()
                 """,
-                user_id, score
+                user_id, clamped_score
             )
     except Exception as e:
         print("REL SET ERROR:", repr(e))
@@ -1196,6 +1210,34 @@ async def status_loop():
             print("STATUS LOOP ERROR:", repr(e))
         await asyncio.sleep(STATUS_UPDATE_SECONDS)
 
+# ================= CLEANUP LOOP =================
+async def cleanup_stale_channels():
+    """Periodically remove dead channels from tracking dicts to prevent memory leaks."""
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        try:
+            await asyncio.sleep(CLEANUP_STALE_CHANNELS_SECONDS)
+            now = time.monotonic()
+            cutoff = now - STALE_CHANNEL_AGE
+
+            # Clean up stale channel tracking
+            stale_channels = [
+                ch_id for ch_id, last_seen in channel_last_activity.items()
+                if last_seen < cutoff
+            ]
+
+            for ch_id in stale_channels:
+                channel_last_activity.pop(ch_id, None)
+                channel_last_bot_talk.pop(ch_id, None)
+                channel_mood.pop(ch_id, None)
+                channel_next_auto_talk.pop(ch_id, None)
+
+            if stale_channels:
+                print(f"🧹 Cleaned up {len(stale_channels)} stale channels")
+
+        except Exception as e:
+            print("CLEANUP LOOP ERROR:", repr(e))
+
 # ================= AUTO TALK =================
 async def auto_talk_loop():
     await bot.wait_until_ready()
@@ -1225,7 +1267,7 @@ async def auto_talk_loop():
 
                 if idle < AUTO_TALK_IDLE_REQUIRED:
                     continue
-                if now - last_bot < AUTO_TALK_INTERVAL:
+                if now - last_bot < AUTO_TALK_RANDOM_MIN:
                     continue
                 if now < next_due:
                     continue
@@ -1257,8 +1299,13 @@ async def auto_talk_loop():
 
         # ===== DM CHANNELS =====
         for channel_id, last_seen in list(channel_last_activity.items()):
-            ch = bot.get_channel(int(channel_id))
-            if not isinstance(ch, discord.DMChannel):
+            try:
+                ch_id = int(channel_id)
+            except ValueError:
+                continue  # Skip invalid channel IDs
+
+            ch = bot.get_channel(ch_id)
+            if ch is None or not isinstance(ch, discord.DMChannel):
                 continue
 
             idle = now - last_seen
@@ -1267,7 +1314,7 @@ async def auto_talk_loop():
 
             if idle < AUTO_TALK_IDLE_REQUIRED:
                 continue
-            if now - last_bot < AUTO_TALK_INTERVAL:
+            if now - last_bot < AUTO_TALK_RANDOM_MIN:
                 continue
             if now < next_due:
                 continue
@@ -1380,6 +1427,10 @@ async def on_ready():
     if not getattr(bot, "_status_started", False):
         bot.loop.create_task(status_loop())
         bot._status_started = True
+
+    if not getattr(bot, "_cleanup_started", False):
+        bot.loop.create_task(cleanup_stale_channels())
+        bot._cleanup_started = True
 
     print(f"🐾 Bot ready as {bot.user} | admins: {len(admins)}")
 
