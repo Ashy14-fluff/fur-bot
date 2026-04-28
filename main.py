@@ -108,6 +108,11 @@ memory_group = app_commands.Group(name="memory", description="Memory commands")
 bot.tree.add_command(admin_group)
 bot.tree.add_command(memory_group)
 
+# ================= ERROR LOGGING =================
+def log_error(where: str, exc: Exception):
+    print(f"[{where}] {type(exc).__name__}: {exc}")
+    print(traceback.format_exc())
+
 # ================= DB =================
 async def init_db():
     global db
@@ -191,8 +196,8 @@ async def init_db():
 
             print("🟢 DB ready")
         except Exception as e:
-            print(f"DB INIT ERROR: {repr(e)}")
             db = None
+            log_error("DB INIT", e)
             raise
 
 
@@ -206,7 +211,6 @@ def touch_channel(channel_id: str):
 
 
 def remember_bot_talk(channel_id: str):
-    """Record bot talk and schedule next auto-talk with random jitter."""
     now = time.monotonic()
     channel_last_bot_talk[channel_id] = now
     jitter = random.randint(AUTO_TALK_RANDOM_MIN, AUTO_TALK_RANDOM_MAX)
@@ -418,7 +422,7 @@ async def save_message(channel_id: str, user_id: str, role: str, content: str):
                 channel_id, user_id, role, content[:2000]
             )
     except Exception as e:
-        print("DB SAVE ERROR:", repr(e))
+        log_error("DB SAVE", e)
 
 
 async def load_history(channel_id: str, limit: int = 20) -> List[dict]:
@@ -438,7 +442,7 @@ async def load_history(channel_id: str, limit: int = 20) -> List[dict]:
         rows = list(reversed(rows))
         return [{"role": r["role"], "content": r["content"]} for r in rows]
     except Exception as e:
-        print("DB LOAD ERROR:", repr(e))
+        log_error("DB LOAD", e)
         return []
 
 
@@ -458,7 +462,7 @@ async def load_facts(user_id: str, limit: int = 10) -> List[str]:
             )
         return [r["fact"] for r in reversed(rows)]
     except Exception as e:
-        print("FACT LOAD ERROR:", repr(e))
+        log_error("FACT LOAD", e)
         return []
 
 
@@ -471,7 +475,7 @@ async def save_fact(user_id: str, fact: str):
                 user_id, fact[:500]
             )
     except Exception as e:
-        print("FACT SAVE ERROR:", repr(e))
+        log_error("FACT SAVE", e)
 
 
 async def save_fact_if_new(user_id: str, fact: str):
@@ -517,7 +521,7 @@ async def ensure_guild_row(guild_id: int):
                 str(guild_id)
             )
     except Exception as e:
-        print(f"GUILD ENSURE ERROR: {repr(e)}")
+        log_error("GUILD ENSURE", e)
 
 
 async def get_guild_admin_role_id(guild_id: int) -> Optional[int]:
@@ -531,7 +535,7 @@ async def get_guild_admin_role_id(guild_id: int) -> Optional[int]:
         if row and row["admin_role_id"] and str(row["admin_role_id"]).isdigit():
             return int(row["admin_role_id"])
     except Exception as e:
-        print("GUILD SETTINGS LOAD ERROR:", repr(e))
+        log_error("GUILD ROLE LOAD", e)
     return None
 
 
@@ -549,7 +553,7 @@ async def set_guild_admin_role_id(guild_id: int, role_id: int):
                 str(guild_id), str(role_id)
             )
     except Exception as e:
-        print("GUILD SETTINGS SAVE ERROR:", repr(e))
+        log_error("GUILD ROLE SAVE", e)
 
 
 async def get_autotalk_enabled(guild_id: int) -> bool:
@@ -565,7 +569,7 @@ async def get_autotalk_enabled(guild_id: int) -> bool:
             return True
         return bool(row["autotalk_enabled"])
     except Exception as e:
-        print("AUTOTALK LOAD ERROR:", repr(e))
+        log_error("AUTOTALK LOAD", e)
         return True
 
 
@@ -579,7 +583,7 @@ async def set_autotalk_enabled(guild_id: int, enabled: bool):
                 str(guild_id), enabled
             )
     except Exception as e:
-        print("AUTOTALK SAVE ERROR:", repr(e))
+        log_error("AUTOTALK SAVE", e)
 
 
 async def get_admin_role(guild: discord.Guild, create: bool = False) -> Optional[discord.Role]:
@@ -594,7 +598,7 @@ async def get_admin_role(guild: discord.Guild, create: bool = False) -> Optional
                         reason="Upgrade admin role to real admin permissions"
                     )
                 except Exception as e:
-                    print("ROLE UPGRADE ERROR:", repr(e))
+                    log_error("ROLE UPGRADE", e)
             return role
 
     role = discord.utils.get(guild.roles, name=ADMIN_ROLE_NAME)
@@ -607,7 +611,7 @@ async def get_admin_role(guild: discord.Guild, create: bool = False) -> Optional
                     reason="Upgrade existing role to real admin permissions"
                 )
             except Exception as e:
-                print("ROLE UPGRADE ERROR:", repr(e))
+                log_error("ROLE UPGRADE", e)
         return role
 
     if not create:
@@ -622,7 +626,7 @@ async def get_admin_role(guild: discord.Guild, create: bool = False) -> Optional
         await set_guild_admin_role_id(guild.id, role.id)
         return role
     except Exception as e:
-        print("ROLE CREATE ERROR:", repr(e))
+        log_error("ROLE CREATE", e)
         return None
 
 # ================= ADMIN =================
@@ -640,17 +644,13 @@ async def load_admins():
             rows = await conn.fetch("SELECT user_id FROM admins")
         admins = {r["user_id"] for r in rows}
     except Exception as e:
-        print("ADMIN LOAD ERROR:", repr(e))
+        log_error("ADMIN LOAD", e)
         admins = set()
 
 
 async def require_admin(interaction: discord.Interaction) -> bool:
     if await is_admin(str(interaction.user.id)):
         return True
-
-    if bot_owner_id is not None and interaction.user.id == bot_owner_id:
-        return True
-
     await send_interaction(interaction, "mrrp~ no permission 🥺", ephemeral=True)
     return False
 
@@ -673,7 +673,7 @@ async def ask_ai(messages: List[dict]) -> str:
     except asyncio.TimeoutError:
         return "mrrp… took too long 🥺"
     except Exception as e:
-        print("GROQ ERROR:", repr(e))
+        log_error("GROQ", e)
         return "mrrp~ something broke 🥺"
 
 
@@ -693,7 +693,7 @@ async def load_recent_bot_messages(channel_id: str, limit: int = RECENT_REPEAT_L
             )
         return [r["content"] for r in reversed(rows)]
     except Exception as e:
-        print("BOT HISTORY LOAD ERROR:", repr(e))
+        log_error("BOT HISTORY LOAD", e)
         return []
 
 
@@ -719,7 +719,7 @@ async def save_bot_message_history(channel_id: str, content: str):
                 channel_id, RECENT_REPEAT_KEEP
             )
     except Exception as e:
-        print("BOT HISTORY SAVE ERROR:", repr(e))
+        log_error("BOT HISTORY SAVE", e)
 
 
 async def is_repetitive(channel_id: str, new_msg: str) -> bool:
@@ -826,7 +826,7 @@ async def memory_forgetme(interaction: discord.Interaction):
             await conn.execute("DELETE FROM user_relationships WHERE user_id=$1", str(interaction.user.id))
         await send_interaction(interaction, "mrrp~ forgot your stored memory here 🫧", ephemeral=True)
     except Exception as e:
-        print("FORGET ERROR:", repr(e))
+        log_error("FORGET", e)
         await send_interaction(interaction, "mrrp~ could not forget dat right now 🥺", ephemeral=True)
 
 # ================= RELATIONSHIP SYSTEM =================
@@ -842,7 +842,7 @@ async def get_relationship_score(user_id: str) -> int:
             return int(row["score"])
         return 0
     except Exception as e:
-        print("REL LOAD ERROR:", repr(e))
+        log_error("REL LOAD", e)
         return 0
 
 
@@ -861,7 +861,7 @@ async def add_relationship_score(user_id: str, delta: int):
                 user_id, delta, RELATIONSHIP_SCORE_MIN, RELATIONSHIP_SCORE_MAX
             )
     except Exception as e:
-        print("REL SAVE ERROR:", repr(e))
+        log_error("REL SAVE", e)
 
 
 async def set_relationship_score(user_id: str, score: int):
@@ -879,7 +879,7 @@ async def set_relationship_score(user_id: str, score: int):
                 user_id, clamped_score
             )
     except Exception as e:
-        print("REL SET ERROR:", repr(e))
+        log_error("REL SET", e)
 
 
 def relationship_tier(score: int) -> str:
@@ -996,7 +996,7 @@ async def admin_add(interaction: discord.Interaction, member: discord.Member):
                 await member.add_roles(role, reason="Admin added")
                 role_added = True
             except Exception as e:
-                print("ROLE ADD ERROR:", repr(e))
+                log_error("ROLE ADD", e)
 
     await add_relationship_score(str(member.id), 5)
 
@@ -1029,7 +1029,7 @@ async def admin_remove(interaction: discord.Interaction, member: discord.Member)
                 await member.remove_roles(role, reason="Admin removed")
                 role_removed = True
             except Exception as e:
-                print("ROLE REMOVE ERROR:", repr(e))
+                log_error("ROLE REMOVE", e)
 
     await add_relationship_score(str(member.id), -3)
 
@@ -1080,7 +1080,7 @@ async def admin_clearhistory(interaction: discord.Interaction):
             await conn.execute("DELETE FROM messages WHERE channel_id=$1", str(interaction.channel_id))
         await send_interaction(interaction, "mrrp~ history cleared 🧹✨", ephemeral=True)
     except Exception as e:
-        print("CLEAR HISTORY ERROR:", repr(e))
+        log_error("CLEAR HISTORY", e)
         await send_interaction(interaction, "mrrp~ could not clear history 🥺", ephemeral=True)
 
 # ================= SLASH CHAT + STATUS + MOOD + PET =================
@@ -1124,9 +1124,9 @@ async def ask_cmd(interaction: discord.Interaction, prompt: str):
 
         await send_followup_with_typing(interaction, reply)
 
-    except Exception:
-        print(traceback.format_exc())
-        await interaction.followup.send("mrrp~ something broke 🥺", ephemeral=True)
+    except Exception as e:
+        log_error("ASK CMD", e)
+        await interaction.followup.send(f"mrrp~ something broke 🥺\n```{type(e).__name__}: {e}```", ephemeral=True)
 
 
 @bot.tree.command(name="pet", description="Pet Fur Bot and make it happy")
@@ -1218,7 +1218,7 @@ async def status_loop():
             activity = build_presence_activity()
             await bot.change_presence(status=discord.Status.online, activity=activity)
         except Exception as e:
-            print("STATUS LOOP ERROR:", repr(e))
+            log_error("STATUS LOOP", e)
         await asyncio.sleep(STATUS_UPDATE_SECONDS)
 
 
@@ -1246,7 +1246,7 @@ async def cleanup_stale_channels():
                 print(f"🧹 Cleaned up {len(stale_channels)} stale channels")
 
         except Exception as e:
-            print("CLEANUP LOOP ERROR:", repr(e))
+            log_error("CLEANUP LOOP", e)
 
 # ================= AUTO TALK =================
 async def auto_talk_loop():
@@ -1254,7 +1254,6 @@ async def auto_talk_loop():
 
     while not bot.is_closed():
         await asyncio.sleep(AUTO_TALK_CHECK_SECONDS)
-
         now = time.monotonic()
 
         # ===== ALL GUILD CHANNELS =====
@@ -1271,7 +1270,6 @@ async def auto_talk_loop():
 
             for ch in guild.text_channels:
                 channel_id = str(ch.id)
-
                 last_seen = channel_last_activity.get(channel_id, 0)
                 idle = now - last_seen
                 last_bot = channel_last_bot_talk.get(channel_id, 0)
@@ -1294,10 +1292,7 @@ async def auto_talk_loop():
                     prompt = [
                         {"role": "system", "content": SYSTEM_PROMPT},
                         {"role": "system", "content": f"Current mood: {mood}"},
-                        {
-                            "role": "system",
-                            "content": f"The bot local time is {now_dt.strftime('%H:%M')} ({tod})."
-                        },
+                        {"role": "system", "content": f"The bot local time is {now_dt.strftime('%H:%M')} ({tod})."},
                         {"role": "user", "content": "Say one short fluffy message to revive chat."}
                     ]
 
@@ -1307,7 +1302,7 @@ async def auto_talk_loop():
                     remember_bot_talk(channel_id)
 
                 except Exception as e:
-                    print("AUTO TALK GUILD ERROR:", repr(e))
+                    log_error("AUTO TALK GUILD", e)
 
         # ===== DM CHANNELS =====
         for channel_id, last_seen in list(channel_last_activity.items()):
@@ -1344,7 +1339,7 @@ async def auto_talk_loop():
                 remember_bot_talk(channel_id)
 
             except Exception as e:
-                print("AUTO TALK DM ERROR:", repr(e))
+                log_error("AUTO TALK DM", e)
 
 # ================= CHAT =================
 @bot.event
@@ -1399,9 +1394,12 @@ async def on_message(message: discord.Message):
 
         await send_with_typing(message.channel, reply)
 
-    except Exception:
-        print(traceback.format_exc())
-        await message.channel.send("mrrp~ something broke 🥺")
+    except Exception as e:
+        log_error("ON_MESSAGE", e)
+        try:
+            await message.channel.send(f"mrrp~ something broke 🥺\n```{type(e).__name__}: {e}```")
+        except Exception:
+            pass
 
 # ================= READY =================
 @bot.event
@@ -1425,7 +1423,7 @@ async def on_ready():
                 print(f"🟣 Synced {len(synced)} global slash commands")
             bot._slash_synced = True
         except Exception as e:
-            print("SLASH SYNC ERROR:", repr(e))
+            log_error("SLASH SYNC", e)
 
     if not getattr(bot, "_auto_talk_started", False):
         bot.loop.create_task(auto_talk_loop())
