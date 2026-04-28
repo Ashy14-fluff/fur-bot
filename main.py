@@ -34,11 +34,14 @@ except Exception:
     BOT_TZ = ZoneInfo("UTC")
 
 SLASH_GUILD_ID = int(GUILD_ID) if GUILD_ID and GUILD_ID.isdigit() else None
+
 groq = Groq(api_key=GROQ_API_KEY)
 
 # ================= BOT =================
 intents = discord.Intents.default()
 intents.message_content = True
+# Only enable presences if you truly turned it on in the Discord Developer Portal.
+# If not, set this to False.
 intents.presences = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -55,12 +58,12 @@ channel_mood: Dict[str, str] = {}
 channel_next_auto_talk: Dict[str, float] = {}
 
 AUTO_TALK_CHECK_SECONDS = 60
-AUTO_TALK_IDLE_REQUIRED = 18000  # 5 hours of silence before auto message
-AUTO_TALK_RANDOM_MIN = 18000     # 5 hours
-AUTO_TALK_RANDOM_MAX = 28800     # 8 hours
-AUTO_TALK_INITIAL_JITTER = 300   # small random offset after talking
+AUTO_TALK_IDLE_REQUIRED = 18000   # 5 hours of silence before auto message
+AUTO_TALK_RANDOM_MIN = 18000      # 5 hours
+AUTO_TALK_RANDOM_MAX = 28800      # 8 hours
+AUTO_TALK_INITIAL_JITTER = 300    # small random offset after talking
 CLEANUP_STALE_CHANNELS_SECONDS = 3600
-STALE_CHANNEL_AGE = 604800  # 7 days
+STALE_CHANNEL_AGE = 604800        # 7 days
 
 STATUS_UPDATE_SECONDS = 120
 
@@ -232,32 +235,37 @@ def time_of_day_label(dt: datetime) -> str:
     return "night"
 
 
-def mood_from_text(text: str) -> str:
-    t = text.lower()
-    if any(w in t for w in ["sad", "cry", "lonely", "hurt", "bad", "upset"]):
-        return "soft"
-    if any(w in t for w in ["happy", "yay", "love", "good", "nice", "cute"]):
-        return "happy"
-    if any(w in t for w in ["sleep", "tired", "zzz", "eep"]):
+def time_aware_mood(channel_id: str) -> str:
+    """Single mood source used by both /mood and AI context."""
+    explicit = channel_mood.get(channel_id, "neutral")
+    idle = time.monotonic() - channel_last_activity.get(channel_id, time.monotonic())
+
+    # Use the same function everywhere so the bot doesn't desync.
+    # Quiet channels drift toward sleepy; active explicit mood stays in charge.
+    if idle > 7200 and explicit == "neutral":
         return "sleepy"
-    if any(w in t for w in ["wow", "omg", "haha", "lol", "hehe"]):
-        return "playful"
-    return "neutral"
+    return explicit
 
 
 def current_live_mood(channel_id: str) -> str:
-    mood = channel_mood.get(channel_id, "neutral")
+    mood = time_aware_mood(channel_id)
     idle = time.monotonic() - channel_last_activity.get(channel_id, time.monotonic())
 
-    if idle > 1800:
-        return "sleepy 😴"
     if mood == "soft":
         return "soft 🥺"
     if mood == "happy":
         return "happy ✨"
     if mood == "playful":
         return "playful >:3"
+    if mood == "sleepy":
+        return "sleepy 😴"
+    if idle > 7200:
+        return "sleepy 😴"
     return "neutral 🐾"
+
+
+def mood_key(channel_id: str) -> str:
+    return time_aware_mood(channel_id)
 
 
 def fluff_wrap(reply: str, mood: str) -> str:
@@ -740,7 +748,7 @@ async def ask_ai_unique(messages: List[dict], channel_id: str) -> str:
             "content": "Avoid repeating similar messages. Previous bot messages:\n- " + "\n- ".join(previous)
         })
 
-    mood = channel_mood.get(channel_id, "neutral")
+    mood = mood_key(channel_id)
 
     for _ in range(MAX_REPEAT_RETRIES):
         candidate = await ask_ai(messages)
@@ -761,7 +769,7 @@ async def ask_ai_unique(messages: List[dict], channel_id: str) -> str:
 async def build_context(channel_id: str, user_id: str, username: str) -> List[dict]:
     history = await load_history(channel_id, limit=20)
     facts = await load_facts(user_id, limit=10)
-    mood = channel_mood.get(channel_id, "neutral")
+    mood = mood_key(channel_id)
     now_dt = bot_local_dt()
     tod = time_of_day_label(now_dt)
 
@@ -1285,7 +1293,7 @@ async def auto_talk_loop():
                     continue
 
                 try:
-                    mood = channel_mood.get(channel_id, "neutral")
+                    mood = mood_key(channel_id)
                     now_dt = bot_local_dt()
                     tod = time_of_day_label(now_dt)
 
@@ -1322,7 +1330,7 @@ async def auto_talk_loop():
                 continue
 
             try:
-                mood = channel_mood.get(channel_id, "neutral")
+                mood = mood_key(channel_id)
                 now_dt = bot_local_dt()
                 tod = time_of_day_label(now_dt)
 
