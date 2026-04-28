@@ -182,9 +182,15 @@ async def init_db():
                 CREATE TABLE IF NOT EXISTS guild_settings(
                     guild_id TEXT PRIMARY KEY,
                     admin_role_id TEXT,
+                    autotalk_channel_id TEXT,
                     autotalk_enabled BOOLEAN NOT NULL DEFAULT TRUE,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 );
+                """)
+
+                await conn.execute("""
+                ALTER TABLE guild_settings
+                ADD COLUMN IF NOT EXISTS autotalk_channel_id TEXT
                 """)
 
                 await conn.execute("""
@@ -615,6 +621,36 @@ async def get_autotalk_enabled(guild_id: int) -> bool:
         return True
 
 
+async def get_autotalk_channel_id(guild_id: int) -> Optional[int]:
+    await ensure_db_initialized()
+    try:
+        await ensure_guild_row(guild_id)
+        async with db.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT autotalk_channel_id FROM guild_settings WHERE guild_id=$1",
+                str(guild_id)
+            )
+        if row and row["autotalk_channel_id"] and str(row["autotalk_channel_id"]).isdigit():
+            return int(row["autotalk_channel_id"])
+    except Exception as e:
+        log_error("AUTOTALK CHANNEL LOAD", e)
+    return None
+
+
+async def set_autotalk_channel_id(guild_id: int, channel_id: Optional[int]):
+    await ensure_db_initialized()
+    try:
+        await ensure_guild_row(guild_id)
+        async with db.acquire() as conn:
+            await conn.execute(
+                "UPDATE guild_settings SET autotalk_channel_id=$2 WHERE guild_id=$1",
+                str(guild_id),
+                str(channel_id) if channel_id is not None else None
+            )
+    except Exception as e:
+        log_error("AUTOTALK CHANNEL SAVE", e)
+
+
 async def set_autotalk_enabled(guild_id: int, enabled: bool):
     await ensure_db_initialized()
     try:
@@ -1014,11 +1050,29 @@ async def admin_autotalk_status(interaction: discord.Interaction):
         await send_interaction(interaction, "mrrp~ this command works in a server only 🥺", ephemeral=True)
         return
     enabled = await get_autotalk_enabled(interaction.guild.id)
+    channel_id = await get_autotalk_channel_id(interaction.guild.id)
+    channel_text = f"<#{channel_id}>" if channel_id else "_not set_"
     await send_interaction(
         interaction,
-        f"mrrp~ auto-talk is **{'ON' if enabled else 'OFF'}** in this server 🐾",
+        f"mrrp~ auto-talk is **{'ON' if enabled else 'OFF'}** in this server 🐾\nchannel: {channel_text}",
         ephemeral=True
     )
+
+
+@admin_group.command(name="autotalk_channel", description="Set the channel used for auto-talk")
+@app_commands.describe(channel="The channel where Fur Bot should auto-talk")
+async def admin_autotalk_channel(interaction: discord.Interaction, channel: discord.TextChannel):
+    if not await require_admin(interaction):
+        return
+    if not interaction.guild:
+        await send_interaction(interaction, "mrrp~ this command works in a server only 🥺", ephemeral=True)
+        return
+    if channel.guild.id != interaction.guild.id:
+        await send_interaction(interaction, "mrrp~ pick a channel from this server only 🥺", ephemeral=True)
+        return
+
+    await set_autotalk_channel_id(interaction.guild.id, channel.id)
+    await send_interaction(interaction, f"mrrp~ auto-talk channel set to {channel.mention} 🐾", ephemeral=True)
 
 # ================= ADMIN COMMANDS =================
 @admin_group.command(name="add", description="Add a user as admin")
@@ -1309,6 +1363,9 @@ async def auto_talk_loop():
             enabled = await get_autotalk_enabled(guild.id)
             if not enabled:
                 continue
+            auto_channel_id = await get_autotalk_channel_id(guild.id)
+            if auto_channel_id is None:
+                continue
 
             me = guild.me
             if me is None and bot.user is not None:
@@ -1316,41 +1373,44 @@ async def auto_talk_loop():
             if not me:
                 continue
 
-            for ch in guild.text_channels:
-                channel_id = str(ch.id)
-                last_seen = channel_last_activity.get(channel_id, 0)
-                idle = now - last_seen
-                last_bot = channel_last_bot_talk.get(channel_id, 0)
-                next_due = channel_next_auto_talk.get(channel_id, 0)
+            ch = guild.get_channel(auto_channel_id)
+            if not isinstance(ch, discord.TextChannel):
+                continue
 
-                if idle < AUTO_TALK_IDLE_REQUIRED:
-                    continue
-                if now - last_bot < AUTO_TALK_RANDOM_MIN:
-                    continue
-                if now < next_due:
-                    continue
-                if not ch.permissions_for(me).send_messages:
-                    continue
+            channel_id = str(ch.id)
+            last_seen = channel_last_activity.get(channel_id, 0)
+            idle = now - last_seen
+            last_bot = channel_last_bot_talk.get(channel_id, 0)
+            next_due = channel_next_auto_talk.get(channel_id, 0)
 
-                try:
-                    mood = mood_key(channel_id)
-                    now_dt = bot_local_dt()
-                    tod = time_of_day_label(now_dt)
+            if idle < AUTO_TALK_IDLE_REQUIRED:
+                continue
+            if now - last_bot < AUTO_TALK_RANDOM_MIN:
+                continue
+            if now < next_due:
+                continue
+            if not ch.permissions_for(me).send_messages:
+                continue
 
-                    prompt = [
-                        {"role": "system", "content": SYSTEM_PROMPT},
-                        {"role": "system", "content": f"Current mood: {mood}"},
-                        {"role": "system", "content": f"The bot local time is {now_dt.strftime('%H:%M')} ({tod})."},
-                        {"role": "user", "content": "Say one short fluffy message to revive chat."}
-                    ]
+            try:
+                mood = mood_key(channel_id)
+                now_dt = bot_local_dt()
+                tod = time_of_day_label(now_dt)
 
-                    msg = await ask_ai_unique(prompt, channel_id)
-                    await ch.send(msg, allowed_mentions=discord.AllowedMentions.none())
-                    await save_bot_message_history(channel_id, msg)
-                    remember_bot_talk(channel_id)
+                prompt = [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "system", "content": f"Current mood: {mood}"},
+                    {"role": "system", "content": f"The bot local time is {now_dt.strftime('%H:%M')} ({tod})."},
+                    {"role": "user", "content": "Say one short fluffy message to revive chat."}
+                ]
 
-                except Exception as e:
-                    log_error("AUTO TALK GUILD", e)
+                msg = await ask_ai_unique(prompt, channel_id)
+                await ch.send(msg, allowed_mentions=discord.AllowedMentions.none())
+                await save_bot_message_history(channel_id, msg)
+                remember_bot_talk(channel_id)
+
+            except Exception as e:
+                log_error("AUTO TALK GUILD", e)
 
         # ===== DM CHANNELS =====
         for channel_id, last_seen in list(channel_last_activity.items()):
