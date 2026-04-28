@@ -944,7 +944,60 @@ async def auto_talk_loop():
 
         now = time.monotonic()
 
+        # ===== 1. CHECK ALL GUILD CHANNELS =====
+        for guild in bot.guilds:
+            for ch in guild.text_channels:
+
+                channel_id = str(ch.id)
+
+                last_seen = channel_last_activity.get(channel_id, 0)
+                idle = now - last_seen
+                last_bot = channel_last_bot_talk.get(channel_id, 0)
+
+                if idle < AUTO_TALK_IDLE_REQUIRED:
+                    continue
+                if now - last_bot < AUTO_TALK_INTERVAL:
+                    continue
+
+                me = guild.me or guild.get_member(bot.user.id)
+                if not me:
+                    continue
+
+                if not ch.permissions_for(me).send_messages:
+                    continue
+
+                try:
+                    mood = channel_mood.get(channel_id, "neutral")
+                    now_dt = bot_local_dt()
+                    tod = time_of_day_label(now_dt)
+
+                    prompt = [
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "system", "content": f"Current mood: {mood}"},
+                        {
+                            "role": "system",
+                            "content": f"The bot local time is {now_dt.strftime('%H:%M')} ({tod})."
+                        },
+                        {"role": "user", "content": "Say one short fluffy message to revive chat."}
+                    ]
+
+                    msg = await ask_ai_unique(prompt, channel_id)
+
+                    await ch.send(msg, allowed_mentions=discord.AllowedMentions.none())
+
+                    await save_bot_message_history(channel_id, msg)
+                    remember_bot_talk(channel_id)
+
+                except Exception as e:
+                    print("AUTO TALK GUILD ERROR:", repr(e))
+
+        # ===== 2. CHECK DM CHANNELS =====
         for channel_id, last_seen in list(channel_last_activity.items()):
+            ch = bot.get_channel(int(channel_id))
+
+            if not isinstance(ch, discord.DMChannel):
+                continue
+
             idle = now - last_seen
             last_bot = channel_last_bot_talk.get(channel_id, 0)
 
@@ -953,45 +1006,27 @@ async def auto_talk_loop():
             if now - last_bot < AUTO_TALK_INTERVAL:
                 continue
 
-            ch = bot.get_channel(int(channel_id))
-            if not isinstance(ch, discord.TextChannel):
-                continue
-
-            me = ch.guild.me
-            if me is None and bot.user is not None:
-                me = ch.guild.get_member(bot.user.id)
-            if me is None:
-                continue
-
-            if not ch.permissions_for(me).send_messages:
-                continue
-
-            mood = channel_mood.get(channel_id, "neutral")
-            now_dt = bot_local_dt()
-            tod = time_of_day_label(now_dt)
-
             try:
+                mood = channel_mood.get(channel_id, "neutral")
+                now_dt = bot_local_dt()
+                tod = time_of_day_label(now_dt)
+
                 prompt = [
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "system", "content": f"Current mood: {mood}"},
-                    {
-                        "role": "system",
-                        "content": (
-                            f"The bot local time is {now_dt.strftime('%H:%M')} ({tod}). "
-                            "Never say a greeting that conflicts with the time. "
-                            "If it is night, use cozy/sleepy vibes. If morning, use morning vibes."
-                        )
-                    },
-                    {"role": "user", "content": "Say one short fluffy message to gently start the chat again."}
+                    {"role": "system", "content": f"Time: {now_dt.strftime('%H:%M')} ({tod})"},
+                    {"role": "user", "content": "Say one short cute message to check on the user."}
                 ]
 
                 msg = await ask_ai_unique(prompt, channel_id)
-                await ch.send(msg, allowed_mentions=discord.AllowedMentions.none())
+
+                await ch.send(msg)
+
                 await save_bot_message_history(channel_id, msg)
                 remember_bot_talk(channel_id)
 
             except Exception as e:
-                print("AUTO TALK ERROR:", repr(e))
+                print("AUTO TALK DM ERROR:", repr(e))
 
 # ================= CHAT =================
 @bot.event
