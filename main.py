@@ -22,6 +22,7 @@ DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 DATABASE_URL = os.getenv("DATABASE_URL")
 MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+MODEL_FALLBACKS_RAW = os.getenv("GROQ_MODEL_FALLBACKS", "")
 GUILD_ID = os.getenv("GUILD_ID")
 BOT_TIMEZONE = os.getenv("BOT_TIMEZONE", "Asia/Jakarta")
 
@@ -36,6 +37,18 @@ except Exception:
 SLASH_GUILD_ID = int(GUILD_ID) if GUILD_ID and GUILD_ID.isdigit() else None
 
 groq = Groq(api_key=GROQ_API_KEY)
+
+
+def build_model_candidates() -> List[str]:
+    candidates = [MODEL]
+    if MODEL_FALLBACKS_RAW.strip():
+        candidates.extend(x.strip() for x in MODEL_FALLBACKS_RAW.split(",") if x.strip())
+
+    # Deduplicate while preserving order
+    return list(dict.fromkeys(candidates))
+
+
+MODEL_CANDIDATES = build_model_candidates()
 
 # ================= BOT =================
 intents = discord.Intents.default()
@@ -685,25 +698,31 @@ async def require_admin(interaction: discord.Interaction) -> bool:
 
 # ================= AI =================
 async def ask_ai(messages: List[dict]) -> str:
-    try:
-        def run():
-            return groq.chat.completions.create(
-                model=MODEL,
-                messages=messages,
-                temperature=0.7,
-                max_tokens=700,
-            ).choices[0].message.content
+    errors = []
 
-        result = await asyncio.wait_for(asyncio.to_thread(run), timeout=30)
-        if not result or not result.strip():
-            return "mrrp~ empty brain moment 🥺"
-        return result.strip()
+    for model_name in MODEL_CANDIDATES:
+        try:
+            def run():
+                return groq.chat.completions.create(
+                    model=model_name,
+                    messages=messages,
+                    temperature=0.7,
+                    max_tokens=700,
+                ).choices[0].message.content
 
-    except asyncio.TimeoutError:
-        return "mrrp… took too long 🥺"
-    except Exception as e:
-        log_error("GROQ", e)
-        return "mrrp~ something broke 🥺"
+            result = await asyncio.wait_for(asyncio.to_thread(run), timeout=30)
+            if result and result.strip():
+                return result.strip()
+            errors.append(f"{model_name}: empty response")
+
+        except asyncio.TimeoutError:
+            errors.append(f"{model_name}: timeout")
+        except Exception as e:
+            log_error(f"GROQ {model_name}", e)
+            errors.append(f"{model_name}: {type(e).__name__}")
+
+    print(f"[GROQ] all model candidates failed: {', '.join(errors)}")
+    return "mrrp~ me had a brain hiccup, can yuw try again in a sec? 🥺🐾"
 
 
 async def load_recent_bot_messages(channel_id: str, limit: int = RECENT_REPEAT_LIMIT) -> List[str]:
