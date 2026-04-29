@@ -43,8 +43,6 @@ def build_model_candidates() -> List[str]:
     candidates = [MODEL]
     if MODEL_FALLBACKS_RAW.strip():
         candidates.extend(x.strip() for x in MODEL_FALLBACKS_RAW.split(",") if x.strip())
-
-    # Deduplicate while preserving order
     return list(dict.fromkeys(candidates))
 
 
@@ -53,9 +51,7 @@ MODEL_CANDIDATES = build_model_candidates()
 # ================= BOT =================
 intents = discord.Intents.default()
 intents.message_content = True
-# Only enable presences if you truly turned it on in the Discord Developer Portal.
-# If not, set this to False.
-intents.presences = True
+intents.presences = True  # only if enabled in Dev Portal
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 db: Optional[asyncpg.Pool] = None
@@ -71,10 +67,10 @@ channel_mood: Dict[str, str] = {}
 channel_next_auto_talk: Dict[str, float] = {}
 
 AUTO_TALK_CHECK_SECONDS = 60
-AUTO_TALK_IDLE_REQUIRED = 18000   # 5 hours of silence before auto message
+AUTO_TALK_IDLE_REQUIRED = 18000   # 5 hours
 AUTO_TALK_RANDOM_MIN = 18000      # 5 hours
 AUTO_TALK_RANDOM_MAX = 28800      # 8 hours
-AUTO_TALK_INITIAL_JITTER = 300    # small random offset after talking
+AUTO_TALK_INITIAL_JITTER = 300
 CLEANUP_STALE_CHANNELS_SECONDS = 3600
 STALE_CHANNEL_AGE = 604800        # 7 days
 
@@ -276,12 +272,9 @@ def mood_from_text(text: str) -> str:
 
 
 def time_aware_mood(channel_id: str) -> str:
-    """Single mood source used by both /mood and AI context."""
     explicit = channel_mood.get(channel_id, "neutral")
     idle = time.monotonic() - channel_last_activity.get(channel_id, time.monotonic())
 
-    # Use the same function everywhere so the bot doesn't desync.
-    # Quiet channels drift toward sleepy; active explicit mood stays in charge.
     if idle > 7200 and explicit == "neutral":
         return "sleepy"
     return explicit
@@ -337,27 +330,29 @@ def fluff_wrap(reply: str, mood: str) -> str:
 
 
 def fluffy_english_filter(text: str) -> str:
-    replacements = {
-        r"\bhello\b": "hewwo",
-        r"\bhi\b": "haii",
-        r"\bhey\b": "heyy",
-        r"\bgood morning\b": "gud mornin~ ☀️",
-        r"\bgood night\b": "gud night~ 🌙",
-        r"\bgood afternoon\b": "gud afternoon~",
-        r"\bgood evening\b": "gud evenin~",
-        r"\bwhat are you doing\b": "whatchu doin~?",
-        r"\bi am\b": "me is",
-        r"\bi'm\b": "me's",
-        r"\byou\b": "yuw",
-        r"\bare you\b": "yuw",
-        r"\bthank you\b": "thank chu~ 💕",
-        r"\bthanks\b": "thanksies~ 💖",
-        r"\bsorry\b": "sowwy 🥺",
-    }
+    # longer / more specific patterns FIRST
+    replacements = [
+        (r"\bgood morning\b", "gud mornin~ ☀️"),
+        (r"\bgood night\b", "gud night~ 🌙"),
+        (r"\bgood afternoon\b", "gud afternoon~"),
+        (r"\bgood evening\b", "gud evenin~"),
+        (r"\bwhat are you doing\b", "whatchu doin~?"),
+        (r"\bthank you\b", "thank chu~ 💕"),
+        (r"\bare you\b", "yuw"),
+        (r"\bi am\b", "me is"),
+        (r"\bi'm\b", "me's"),
+        (r"\bhello\b", "hewwo"),
+        (r"\bhi\b", "haii"),
+        (r"\bhey\b", "heyy"),
+        (r"\byou\b", "yuw"),
+        (r"\bi\b", "me"),
+        (r"\bthanks\b", "thanksies~ 💖"),
+        (r"\bsorry\b", "sowwy 🥺"),
+    ]
 
     out = text
-    for k, v in replacements.items():
-        out = re.sub(k, v, out, flags=re.IGNORECASE)
+    for pattern, repl in replacements:
+        out = re.sub(pattern, repl, out, flags=re.IGNORECASE)
     return out
 
 
@@ -385,12 +380,24 @@ def strip_trigger_text(message: discord.Message) -> str:
     return text.strip()
 
 
-def is_bot_reply(message: discord.Message) -> bool:
-    if not message.reference or not message.reference.resolved:
+async def is_bot_reply(message: discord.Message) -> bool:
+    ref = message.reference
+    if not ref:
         return False
-    resolved = message.reference.resolved
-    author = getattr(resolved, "author", None)
-    return bool(author and bot.user and author.id == bot.user.id)
+
+    if ref.resolved is not None:
+        resolved = ref.resolved
+        author = getattr(resolved, "author", None)
+        return bool(author and bot.user and author.id == bot.user.id)
+
+    if not ref.message_id:
+        return False
+
+    try:
+        fetched = await message.channel.fetch_message(ref.message_id)
+        return bool(bot.user and fetched.author.id == bot.user.id)
+    except Exception:
+        return False
 
 
 def similarity(a: str, b: str) -> float:
@@ -537,22 +544,30 @@ async def save_fact_if_new(user_id: str, fact: str):
 
 
 def extract_fact(text: str) -> Optional[str]:
+    text = text.strip()
+
     patterns = [
         (r"\bmy name is\s+(.+)$", "name"),
         (r"\bcall me\s+(.+)$", "name"),
         (r"\bi like\s+(.+)$", "likes"),
         (r"\bi love\s+(.+)$", "loves"),
         (r"\bi hate\s+(.+)$", "hates"),
-        (r"\bi'm\s+(.+)$", "is"),
-        (r"\bi am\s+(.+)$", "is"),
     ]
 
     for pat, label in patterns:
-        m = re.search(pat, text.strip(), re.IGNORECASE)
+        m = re.search(pat, text, re.IGNORECASE)
         if m:
             value = m.group(1).strip(" .!?")
             if value:
                 return f"{label}: {value}"
+
+    # only store "I am" / "I'm" if it seems more permanent
+    m = re.search(r"\bi (?:am|\'m)\s+(.+)$", text, re.IGNORECASE)
+    if m:
+        value = m.group(1).strip(" .!?")
+        if not any(w in value.lower() for w in ["hungry", "tired", "sleepy", "bored"]):
+            return f"is: {value}"
+
     return None
 
 # ================= GUILD SETTINGS =================
@@ -1262,7 +1277,7 @@ async def status_cmd(interaction: discord.Interaction):
     if not await require_admin(interaction):
         return
 
-    await interaction.response.defer(thinking=False)
+    await interaction.response.defer(thinking=True)
 
     await ensure_db_initialized()
     async with db.acquire() as conn:
@@ -1322,7 +1337,6 @@ async def status_loop():
         except Exception as e:
             log_error("STATUS LOOP", e)
         await asyncio.sleep(STATUS_UPDATE_SECONDS)
-
 
 # ================= CLEANUP LOOP =================
 async def cleanup_stale_channels():
@@ -1473,7 +1487,7 @@ async def on_message(message: discord.Message):
 
     is_dm = isinstance(message.channel, discord.DMChannel)
     is_mention = bot.user is not None and bot.user.mentioned_in(message)
-    reply_to_bot = is_bot_reply(message)
+    reply_to_bot = await is_bot_reply(message)
 
     if not (is_dm or is_mention or reply_to_bot):
         return
@@ -1546,5 +1560,6 @@ async def on_ready():
         bot._cleanup_started = True
 
     print(f"🐾 Bot ready as {bot.user} | admins: {len(admins)}")
+
 
 bot.run(DISCORD_TOKEN)
