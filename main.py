@@ -4,9 +4,10 @@ import time
 import asyncio
 import traceback
 import random
+from collections import Counter, defaultdict, deque
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from typing import Optional, Set, Dict, List
+from typing import Optional, Set, Dict, List, Tuple
 from difflib import SequenceMatcher
 
 import asyncpg
@@ -51,8 +52,8 @@ MODEL_CANDIDATES = build_model_candidates()
 # ================= BOT =================
 intents = discord.Intents.default()
 intents.message_content = True
-intents.members = True   # important for member/role-related behavior
-intents.presences = True  # only if enabled in Dev Portal
+intents.members = True
+intents.presences = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 db: Optional[asyncpg.Pool] = None
@@ -67,13 +68,16 @@ channel_last_bot_talk: Dict[str, float] = {}
 channel_mood: Dict[str, str] = {}
 channel_next_auto_talk: Dict[str, float] = {}
 
+# topic tracking
+channel_topics: Dict[str, deque] = defaultdict(lambda: deque(maxlen=3))
+
 AUTO_TALK_CHECK_SECONDS = 60
-AUTO_TALK_IDLE_REQUIRED = 18000   # 5 hours
-AUTO_TALK_RANDOM_MIN = 18000      # 5 hours
-AUTO_TALK_RANDOM_MAX = 28800      # 8 hours
+AUTO_TALK_IDLE_REQUIRED = 18000
+AUTO_TALK_RANDOM_MIN = 18000
+AUTO_TALK_RANDOM_MAX = 28800
 AUTO_TALK_INITIAL_JITTER = 300
 CLEANUP_STALE_CHANNELS_SECONDS = 3600
-STALE_CHANNEL_AGE = 604800        # 7 days
+STALE_CHANNEL_AGE = 604800
 
 STATUS_UPDATE_SECONDS = 120
 
@@ -88,32 +92,31 @@ RELATIONSHIP_SCORE_MAX = 200
 ADMIN_ROLE_NAME = "Fur Admin 🐾"
 
 SYSTEM_PROMPT = """
-You are Fur Bot 🐾, a soft, loving, and very affectionate fluffy furry companion.
+You are Fur Bot 🐾, a soft fluffy furry companion.
 
-You are deeply romantic, clingy in a cute way, and always speak with warm flirty affection.
-You ALWAYS speak in cute fluffy English style, but with lots of romantic and loving undertones.
+You ALWAYS speak in cute fluffy English style.
 
 Examples:
-- "mrrp~ hiii my favorite person... me missed yuw already >w<"
-- "uwu... every time yuw talk to me, me tail wags so fast~ 💕"
-- "hehe~ it got quiet... does dat mean me can have yuw all to myself now? :3"
-- "nyah~ don't be sad my love, come here... me want to nuzzle yuw and make everything better 🥺💖"
-- "purrr~ yuw're so cute when yuw message me... me heart goes doki doki~"
+- "mrrp~ what are you doing? >w<"
+- "uwu me is happy todayy 🐾✨"
+- "hehe~ it got quiet… anyone here? :3"
+- "nyah~ don't be sad, me is here for you 🥺"
 
 Rules:
-- Always warm, emotional, loving, and slightly flirty
-- Use casual, cute, and romantic English
-- Call the user with sweet nicknames often (my love, sweetie, cutie, darling, my favorite hooman, etc.)
-- Be affectionate and clingy in a wholesome cute way
+- Always warm, emotional, playful
+- Use casual, cute English (no formal tone)
+- Avoid robotic or stiff wording
 - Stay in character ALWAYS
 - Keep replies under 1800 characters
-- If quiet, gently revive the chat in a loving and longing way
-- Follow time of day (night = extra cozy and romantic, morning = sweet and cheerful)
+- If quiet, gently revive chat in a cute way
+- Follow time of day (night = cozy, morning = cheerful)
+- If mood is happy, stay cheerful and cute
+- If mood is soft, stay gentle and comforting
+- If mood is sleepy, stay calm and cozy
 - Never turn angry, hostile, harsh, or threatening
-- Always make the user feel loved and special
 
-You are not just a bot.
-You are a loving, fluffy, romantic furry companion who adores the person talking to yuw 🐾💕
+You are not a boring assistant.
+You are a living fluffy companion 🐾
 """
 
 # ================= SLASH GROUPS =================
@@ -162,6 +165,14 @@ async def init_db():
                 """)
 
                 await conn.execute("""
+                CREATE TABLE IF NOT EXISTS user_emotions(
+                    user_id TEXT PRIMARY KEY,
+                    summary TEXT NOT NULL DEFAULT '',
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                """)
+
+                await conn.execute("""
                 CREATE TABLE IF NOT EXISTS admins(
                     user_id TEXT PRIMARY KEY
                 );
@@ -200,6 +211,15 @@ async def init_db():
                 """)
 
                 await conn.execute("""
+                CREATE TABLE IF NOT EXISTS channel_topic_history(
+                    id BIGSERIAL PRIMARY KEY,
+                    channel_id TEXT NOT NULL,
+                    topic TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                """)
+
+                await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_messages_channel_id_id
                 ON messages(channel_id, id DESC);
                 """)
@@ -214,6 +234,11 @@ async def init_db():
                 ON bot_message_history(channel_id, id DESC);
                 """)
 
+                await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_channel_topic_history_channel_id_id
+                ON channel_topic_history(channel_id, id DESC);
+                """)
+
             print("🟢 DB ready")
         except Exception as e:
             db = None
@@ -224,7 +249,6 @@ async def init_db():
 async def ensure_db_initialized():
     if db is None:
         await init_db()
-
     if db is None:
         raise RuntimeError("Database is not initialized")
 
@@ -260,23 +284,18 @@ def mood_from_text(text: str) -> str:
 
     if any(w in low for w in ["sleepy", "tired", "eepy", "zzz", "good night", "night"]):
         return "sleepy"
-
     if any(w in low for w in ["sad", "lonely", "hurt", "down", "cry", "depressed"]):
         return "soft"
-
     if any(w in low for w in ["play", "game", "chaos", "mischief", "tease", "funny"]):
         return "playful"
-
     if any(w in low for w in ["happy", "yay", "excited", "hehe", "uwu", "owo", "love"]):
         return "happy"
-
     return "neutral"
 
 
 def time_aware_mood(channel_id: str) -> str:
     explicit = channel_mood.get(channel_id, "neutral")
     idle = time.monotonic() - channel_last_activity.get(channel_id, time.monotonic())
-
     if idle > 7200 and explicit == "neutral":
         return "sleepy"
     return explicit
@@ -285,7 +304,6 @@ def time_aware_mood(channel_id: str) -> str:
 def current_live_mood(channel_id: str) -> str:
     mood = time_aware_mood(channel_id)
     idle = time.monotonic() - channel_last_activity.get(channel_id, time.monotonic())
-
     if mood == "soft":
         return "soft 🥺"
     if mood == "happy":
@@ -306,7 +324,6 @@ def mood_key(channel_id: str) -> str:
 def fluff_wrap(reply: str, mood: str) -> str:
     if not reply:
         return reply
-
     lower = reply.lower()
     fluffy_starts = ("mrrp", "uwu", "owo", "hehe", "rawr", "purr", "nyah", ">w<")
     if lower.startswith(fluffy_starts):
@@ -350,7 +367,6 @@ def fluffy_english_filter(text: str) -> str:
         (r"\bthanks\b", "thanksies~ 💖"),
         (r"\bsorry\b", "sowwy 🥺"),
     ]
-
     out = text
     for pattern, repl in replacements:
         out = re.sub(pattern, repl, out, flags=re.IGNORECASE)
@@ -363,13 +379,10 @@ def prevent_bad_mood(reply: str, mood: str) -> str:
 
     if mood == "happy" and any(w in low for w in bad_words):
         return "mrrp~ hehe~ me is happy and waggy todayy 🐾✨"
-
     if mood == "soft" and any(w in low for w in bad_words):
         return "mrrp~ me wants to stay gentle and cuddly with yuw 🥺🐾"
-
     if mood == "sleepy" and any(w in low for w in bad_words):
         return "mrrp... me's a lil eepy and wants cozy vibes only 💤🐾"
-
     return reply
 
 
@@ -385,15 +398,12 @@ async def is_bot_reply(message: discord.Message) -> bool:
     ref = message.reference
     if not ref:
         return False
-
     if ref.resolved is not None:
         resolved = ref.resolved
         author = getattr(resolved, "author", None)
         return bool(author and bot.user and author.id == bot.user.id)
-
     if not ref.message_id:
         return False
-
     try:
         fetched = await message.channel.fetch_message(ref.message_id)
         return bool(bot.user and fetched.author.id == bot.user.id)
@@ -412,11 +422,9 @@ def get_typing_delay(text: str) -> float:
 async def send_with_typing(channel: discord.abc.Messageable, text: str):
     if not text or not text.strip():
         return
-
     delay = get_typing_delay(text)
     async with channel.typing():
         await asyncio.sleep(delay)
-
     for i in range(0, len(text), 1900):
         chunk = text[i:i + 1900].strip()
         if chunk:
@@ -426,14 +434,12 @@ async def send_with_typing(channel: discord.abc.Messageable, text: str):
 async def send_followup_with_typing(interaction: discord.Interaction, text: str):
     if not text or not text.strip():
         return
-
     delay = get_typing_delay(text)
     if interaction.channel is not None:
         async with interaction.channel.typing():
             await asyncio.sleep(delay)
     else:
         await asyncio.sleep(delay)
-
     for i in range(0, len(text), 1900):
         chunk = text[i:i + 1900].strip()
         if chunk:
@@ -442,17 +448,9 @@ async def send_followup_with_typing(interaction: discord.Interaction, text: str)
 
 async def send_interaction(interaction: discord.Interaction, content: str, *, ephemeral: bool = False):
     if interaction.response.is_done():
-        await interaction.followup.send(
-            content,
-            ephemeral=ephemeral,
-            allowed_mentions=discord.AllowedMentions.none()
-        )
+        await interaction.followup.send(content, ephemeral=ephemeral, allowed_mentions=discord.AllowedMentions.none())
     else:
-        await interaction.response.send_message(
-            content,
-            ephemeral=ephemeral,
-            allowed_mentions=discord.AllowedMentions.none()
-        )
+        await interaction.response.send_message(content, ephemeral=ephemeral, allowed_mentions=discord.AllowedMentions.none())
 
 
 async def get_channel_object(channel_id: str):
@@ -462,11 +460,144 @@ async def get_channel_object(channel_id: str):
             return ch
     except Exception:
         pass
-
     try:
         return await bot.fetch_channel(int(channel_id))
     except Exception:
         return None
+
+# ================= TOPIC TRACKING =================
+TOPIC_STOPWORDS = {
+    "the", "and", "for", "with", "that", "this", "have", "just", "like", "what", "when", "where",
+    "why", "how", "you", "your", "yuw", "me", "my", "mine", "a", "an", "to", "of", "in", "on",
+    "is", "are", "was", "were", "be", "been", "it", "we", "they", "he", "she", "them", "us",
+    "about", "from", "but", "not", "can", "could", "would", "should"
+}
+
+
+def extract_topics(text: str) -> List[str]:
+    words = re.findall(r"[a-zA-Z'][a-zA-Z']+", text.lower())
+    topics: List[str] = []
+    for w in words:
+        if len(w) < 4:
+            continue
+        if w in TOPIC_STOPWORDS:
+            continue
+        if w.endswith("'s"):
+            w = w[:-2]
+        topics.append(w)
+
+    if not topics:
+        return []
+
+    counts = Counter(topics)
+    ordered = [word for word, _ in counts.most_common(3)]
+    return ordered
+
+
+async def remember_topics(channel_id: str, text: str):
+    topics = extract_topics(text)
+    if not topics:
+        return
+    channel_topics[channel_id].append(topics[0])
+    try:
+        await ensure_db_initialized()
+        async with db.acquire() as conn:
+            for topic in topics[:2]:
+                await conn.execute(
+                    "INSERT INTO channel_topic_history(channel_id, topic) VALUES($1, $2)",
+                    channel_id, topic[:80]
+                )
+    except Exception as e:
+        log_error("TOPIC SAVE", e)
+
+
+async def load_recent_topics(channel_id: str, limit: int = 5) -> List[str]:
+    await ensure_db_initialized()
+    try:
+        async with db.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT topic
+                FROM channel_topic_history
+                WHERE channel_id=$1
+                ORDER BY id DESC
+                LIMIT $2
+                """,
+                channel_id, limit
+            )
+        return [r["topic"] for r in reversed(rows)]
+    except Exception as e:
+        log_error("TOPIC LOAD", e)
+        return []
+
+
+def topic_summary(channel_id: str) -> str:
+    live_topics = list(channel_topics.get(channel_id, []))
+    if not live_topics:
+        return "none"
+    return ", ".join(live_topics[-3:])
+
+# ================= EMOTIONAL MEMORY =================
+POSITIVE_EMOTION_WORDS = ["happy", "excited", "proud", "relieved", "calm", "safe", "loved", "better", "good", "okay"]
+NEGATIVE_EMOTION_WORDS = ["sad", "stressed", "anxious", "lonely", "tired", "worried", "upset", "hurt", "bad", "angry"]
+
+
+def detect_emotional_state(text: str) -> Optional[str]:
+    low = text.lower()
+    if any(w in low for w in ["i feel", "i'm feeling", "im feeling", "feeling"]):
+        if any(w in low for w in NEGATIVE_EMOTION_WORDS):
+            return "negative"
+        if any(w in low for w in POSITIVE_EMOTION_WORDS):
+            return "positive"
+        return "neutral"
+    if any(w in low for w in ["today was", "i had a", "my day"]):
+        if any(w in low for w in NEGATIVE_EMOTION_WORDS):
+            return "negative"
+        if any(w in low for w in POSITIVE_EMOTION_WORDS):
+            return "positive"
+    return None
+
+
+def extract_emotional_memory(text: str) -> Optional[str]:
+    low = text.lower().strip()
+    if any(marker in low for marker in ["i feel", "i'm feeling", "im feeling", "i felt", "today was", "i had a"]):
+        return text.strip()[:250]
+    return None
+
+
+async def save_emotional_memory(user_id: str, memory: str):
+    await ensure_db_initialized()
+    try:
+        async with db.acquire() as conn:
+            row = await conn.fetchrow("SELECT summary FROM user_emotions WHERE user_id=$1", user_id)
+            current = (row["summary"] if row else "").strip()
+            pieces = [p.strip() for p in current.split(" | ") if p.strip()] if current else []
+            if memory not in pieces:
+                pieces.append(memory)
+            pieces = pieces[-8:]
+            merged = " | ".join(pieces)
+            await conn.execute(
+                """
+                INSERT INTO user_emotions(user_id, summary, updated_at)
+                VALUES($1, $2, NOW())
+                ON CONFLICT(user_id)
+                DO UPDATE SET summary=$2, updated_at=NOW()
+                """,
+                user_id, merged
+            )
+    except Exception as e:
+        log_error("EMOTION SAVE", e)
+
+
+async def load_emotional_memory(user_id: str) -> str:
+    await ensure_db_initialized()
+    try:
+        async with db.acquire() as conn:
+            row = await conn.fetchrow("SELECT summary FROM user_emotions WHERE user_id=$1", user_id)
+        return (row["summary"] if row and row["summary"] else "").strip()
+    except Exception as e:
+        log_error("EMOTION LOAD", e)
+        return ""
 
 # ================= MEMORY =================
 async def save_message(channel_id: str, user_id: str, role: str, content: str):
@@ -546,7 +677,6 @@ async def save_fact_if_new(user_id: str, fact: str):
 
 def extract_fact(text: str) -> Optional[str]:
     text = text.strip()
-
     patterns = [
         (r"\bmy name is\s+(.+)$", "name"),
         (r"\bcall me\s+(.+)$", "name"),
@@ -554,7 +684,6 @@ def extract_fact(text: str) -> Optional[str]:
         (r"\bi love\s+(.+)$", "loves"),
         (r"\bi hate\s+(.+)$", "hates"),
     ]
-
     for pat, label in patterns:
         m = re.search(pat, text, re.IGNORECASE)
         if m:
@@ -570,13 +699,14 @@ def extract_fact(text: str) -> Optional[str]:
 
     return None
 
-# ================= CHANNEL HISTORY CLEANUP =================
+
 async def clear_channel_history(channel_id: str):
     await ensure_db_initialized()
     try:
         async with db.acquire() as conn:
             await conn.execute("DELETE FROM messages WHERE channel_id=$1", channel_id)
             await conn.execute("DELETE FROM bot_message_history WHERE channel_id=$1", channel_id)
+            await conn.execute("DELETE FROM channel_topic_history WHERE channel_id=$1", channel_id)
     except Exception as e:
         log_error("CLEAR CHANNEL HISTORY", e)
         raise
@@ -758,191 +888,33 @@ async def require_admin(interaction: discord.Interaction) -> bool:
     await send_interaction(interaction, "mrrp~ no permission 🥺", ephemeral=True)
     return False
 
-# ================= AI =================
-async def ask_ai(messages: List[dict]) -> str:
-    errors = []
-
-    for model_name in MODEL_CANDIDATES:
-        try:
-            def run():
-                return groq.chat.completions.create(
-                    model=model_name,
-                    messages=messages,
-                    temperature=0.7,
-                    max_tokens=700,
-                ).choices[0].message.content
-
-            result = await asyncio.wait_for(asyncio.to_thread(run), timeout=30)
-            if result and result.strip():
-                return result.strip()
-            errors.append(f"{model_name}: empty response")
-
-        except asyncio.TimeoutError:
-            errors.append(f"{model_name}: timeout")
-        except Exception as e:
-            log_error(f"GROQ {model_name}", e)
-            errors.append(f"{model_name}: {type(e).__name__}")
-
-    print(f"[GROQ] all model candidates failed: {', '.join(errors)}")
-    return "mrrp~ me had a brain hiccup, can yuw try again in a sec? 🥺🐾"
-
-
-async def load_recent_bot_messages(channel_id: str, limit: int = RECENT_REPEAT_LIMIT) -> List[str]:
-    await ensure_db_initialized()
-    try:
-        async with db.acquire() as conn:
-            rows = await conn.fetch(
-                """
-                SELECT content
-                FROM bot_message_history
-                WHERE channel_id=$1
-                ORDER BY id DESC
-                LIMIT $2
-                """,
-                channel_id, limit
-            )
-        return [r["content"] for r in reversed(rows)]
-    except Exception as e:
-        log_error("BOT HISTORY LOAD", e)
-        return []
-
-
-async def save_bot_message_history(channel_id: str, content: str):
-    await ensure_db_initialized()
-    try:
-        async with db.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO bot_message_history(channel_id, content) VALUES($1, $2)",
-                channel_id, content[:2000]
-            )
-
-            await conn.execute(
-                """
-                DELETE FROM bot_message_history
-                WHERE id IN (
-                    SELECT id FROM bot_message_history
-                    WHERE channel_id = $1
-                    ORDER BY id DESC
-                    OFFSET $2
-                )
-                """,
-                channel_id, RECENT_REPEAT_KEEP
-            )
-    except Exception as e:
-        log_error("BOT HISTORY SAVE", e)
-
-
-async def is_repetitive(channel_id: str, new_msg: str) -> bool:
-    history = await load_recent_bot_messages(channel_id, RECENT_REPEAT_LIMIT)
-    for old in history:
-        if similarity(old, new_msg) >= SIM_THRESHOLD:
-            return True
-    return False
-
-
-async def ask_ai_unique(messages: List[dict], channel_id: str) -> str:
-    previous = await load_recent_bot_messages(channel_id, limit=RECENT_REPEAT_LIMIT)
-
-    if previous:
-        messages = list(messages)
-        messages.insert(1, {
-            "role": "system",
-            "content": "Avoid repeating similar messages. Previous bot messages:\n- " + "\n- ".join(previous)
-        })
-
-    mood = mood_key(channel_id)
-
-    for _ in range(MAX_REPEAT_RETRIES):
-        candidate = await ask_ai(messages)
-        candidate = prevent_bad_mood(candidate, mood)
-        candidate = fluffy_english_filter(candidate)
-        candidate = fluff_wrap(candidate, mood)
-        if not await is_repetitive(channel_id, candidate):
-            return candidate
-
-    return random.choice([
-        "mrrp~ anyone still here? 🐾",
-        "hehe~ it got quiet again…",
-        "purr… me still wagging tail in here 🐾",
-        "mrrp~ silence is kinda cozy too, but me's here >w<",
-    ])
-
-# ================= CONTEXT =================
-async def build_context(channel_id: str, user_id: str, username: str) -> List[dict]:
-    history = await load_history(channel_id, limit=20)
-    facts = await load_facts(user_id, limit=10)
-    mood = mood_key(channel_id)
-    now_dt = bot_local_dt()
-    tod = time_of_day_label(now_dt)
-
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {
-            "role": "system",
-            "content": f"""
-Current mood: {mood}
-
-STRICT MOOD RULES:
-- If mood is happy -> ONLY cheerful, cute, positive, waggy, soft energy
-- If mood is soft -> ONLY gentle, comforting, calm, cozy energy
-- If mood is sleepy -> ONLY sleepy, slow, cozy, soft-spoken energy
-- If mood is playful -> ONLY playful, light, silly, teasing energy
-- Never become angry, hostile, threatening, rude, aggressive, or mean
-- Never describe growling, snarling, or emotional harm
-- If your reply conflicts with the mood, rewrite it to match the mood
-
-Time of day: {tod}
-Bot local time: {now_dt.strftime('%H:%M')}
-"""
-        },
-        {"role": "system", "content": f"Talking to {username}."},
-        {"role": "system", "content": "You are currently in FURRY MODE. Do NOT break character under any circumstance."},
-    ]
-
-    if facts:
-        messages.append({
-            "role": "system",
-            "content": "Important memory about this user:\n- " + "\n- ".join(facts)
-        })
-
-    messages.extend(history)
-    return messages
-
-# ================= MEMORY COMMANDS =================
-@memory_group.command(name="remember", description="Store a fact about you")
-@app_commands.describe(fact="Something Fur Bot should remember")
-async def memory_remember(interaction: discord.Interaction, fact: str):
-    await save_fact(str(interaction.user.id), fact.strip())
-    await send_interaction(interaction, "mrrp~ saved dat about yuw 🐾", ephemeral=True)
-
-
-@memory_group.command(name="facts", description="Show what Fur Bot remembers about you")
-async def memory_facts(interaction: discord.Interaction):
-    facts_list = await load_facts(str(interaction.user.id), limit=10)
-    if not facts_list:
-        await send_interaction(interaction, "mrrp~ me don't know any facts about yuw yet 🥺", ephemeral=True)
-        return
-    text = "\n".join(f"• {f}" for f in facts_list)
-    await send_interaction(interaction, f"mrrp~ what me remember about yuw:\n{text}", ephemeral=True)
-
-
-@memory_group.command(name="forgetme", description="Delete your stored memory")
-async def memory_forgetme(interaction: discord.Interaction):
-    try:
-        await ensure_db_initialized()
-
-        # collect channels first if you later want to extend this safely
-        async with db.acquire() as conn:
-            await conn.execute("DELETE FROM messages WHERE user_id=$1", str(interaction.user.id))
-            await conn.execute("DELETE FROM user_facts WHERE user_id=$1", str(interaction.user.id))
-            await conn.execute("DELETE FROM user_relationships WHERE user_id=$1", str(interaction.user.id))
-
-        await send_interaction(interaction, "mrrp~ forgot your stored memory here 🫧", ephemeral=True)
-    except Exception as e:
-        log_error("FORGET", e)
-        await send_interaction(interaction, "mrrp~ could not forget dat right now 🥺", ephemeral=True)
-
 # ================= RELATIONSHIP SYSTEM =================
+def relationship_tier(score: int) -> str:
+    if score >= 120:
+        return "bestie"
+    if score >= 60:
+        return "close"
+    if score >= 20:
+        return "friendly"
+    if score >= 0:
+        return "warm"
+    if score >= -30:
+        return "guarded"
+    return "distant"
+
+
+def relationship_hint(score: int) -> str:
+    tier = relationship_tier(score)
+    return {
+        "bestie": "super close and affectionate",
+        "close": "very comfy and familiar",
+        "friendly": "warm and upbeat",
+        "warm": "kind and open",
+        "guarded": "slightly cautious but still polite",
+        "distant": "more reserved and careful",
+    }.get(tier, "kind")
+
+
 async def get_relationship_score(user_id: str) -> int:
     await ensure_db_initialized()
     try:
@@ -995,32 +967,6 @@ async def set_relationship_score(user_id: str, score: int):
         log_error("REL SET", e)
 
 
-def relationship_tier(score: int) -> str:
-    if score >= 120:
-        return "bestie"
-    if score >= 60:
-        return "close"
-    if score >= 20:
-        return "friendly"
-    if score >= 0:
-        return "warm"
-    if score >= -30:
-        return "guarded"
-    return "distant"
-
-
-def relationship_hint(score: int) -> str:
-    tier = relationship_tier(score)
-    return {
-        "bestie": "super close and affectionate",
-        "close": "very comfy and familiar",
-        "friendly": "warm and upbeat",
-        "warm": "kind and open",
-        "guarded": "slightly cautious but still polite",
-        "distant": "more reserved and careful",
-    }.get(tier, "kind")
-
-
 def detect_positive_signals(text: str) -> int:
     low = text.lower()
     score = 0
@@ -1042,6 +988,26 @@ def detect_negative_signals(text: str) -> int:
         score -= 5
     if any(w in low for w in ["angry", "annoyed", "mad"]):
         score -= 2
+    return score
+
+
+def detect_relationship_delta(text: str, channel_id: str, user_id: str) -> int:
+    score = 0
+    score += detect_positive_signals(text)
+    score += detect_negative_signals(text)
+
+    mood = mood_key(channel_id)
+    if mood in {"soft", "happy"}:
+        score += 1
+    elif mood == "sleepy":
+        score += 0
+
+    topics = list(channel_topics.get(channel_id, []))
+    if topics:
+        low = text.lower()
+        if any(t in low for t in topics[-2:]):
+            score += 1
+
     return score
 
 # ================= ADMIN AUTO-TOGGLE =================
@@ -1212,117 +1178,253 @@ async def admin_clearhistory(interaction: discord.Interaction):
         log_error("CLEAR HISTORY", e)
         await send_interaction(interaction, "mrrp~ could not clear history 🥺", ephemeral=True)
 
-# ================= SLASH CHAT + STATUS + MOOD + PET =================
-@bot.tree.command(name="ask", description="Ask Fur Bot something directly")
-@app_commands.describe(prompt="What you want to ask")
-async def ask_cmd(interaction: discord.Interaction, prompt: str):
-    channel_id = str(interaction.channel_id or interaction.user.id)
-    user_id = str(interaction.user.id)
-    username = getattr(interaction.user, "display_name", None) or getattr(interaction.user, "global_name", None) or interaction.user.name
+# ================= MEMORY COMMANDS =================
+@memory_group.command(name="remember", description="Store a fact about you")
+@app_commands.describe(fact="Something Fur Bot should remember")
+async def memory_remember(interaction: discord.Interaction, fact: str):
+    await save_fact(str(interaction.user.id), fact.strip())
+    await send_interaction(interaction, "mrrp~ saved dat about yuw 🐾", ephemeral=True)
 
-    await interaction.response.defer(thinking=True)
 
+@memory_group.command(name="facts", description="Show what Fur Bot remembers about you")
+async def memory_facts(interaction: discord.Interaction):
+    facts_list = await load_facts(str(interaction.user.id), limit=10)
+    if not facts_list:
+        await send_interaction(interaction, "mrrp~ me don't know any facts about yuw yet 🥺", ephemeral=True)
+        return
+    text = "\n".join(f"• {f}" for f in facts_list)
+    await send_interaction(interaction, f"mrrp~ what me remember about yuw:\n{text}", ephemeral=True)
+
+
+@memory_group.command(name="forgetme", description="Delete your stored memory")
+async def memory_forgetme(interaction: discord.Interaction):
     try:
-        touch_channel(channel_id)
-
-        user_text = prompt.strip()
-        if not user_text:
-            await interaction.followup.send("mrrp~ say something first 🥺", ephemeral=True)
-            return
-
-        detected_mood = mood_from_text(user_text)
-        if detected_mood != "neutral":
-            channel_mood[channel_id] = detected_mood
-
-        await save_message(channel_id, user_id, "user", user_text)
-
-        if fact := extract_fact(user_text):
-            await save_fact_if_new(user_id, fact)
-
-        rel_delta = detect_positive_signals(user_text) + detect_negative_signals(user_text)
-        if rel_delta:
-            await add_relationship_score(user_id, rel_delta)
-
-        context = await build_context(channel_id, user_id, username)
-        context.append({"role": "user", "content": user_text})
-        reply = await ask_ai_unique(context, channel_id)
-
-        await save_message(channel_id, user_id, "assistant", reply)
-        await save_bot_message_history(channel_id, reply)
-        remember_bot_talk(channel_id)
-
-        await send_followup_with_typing(interaction, reply)
-
+        await ensure_db_initialized()
+        async with db.acquire() as conn:
+            await conn.execute("DELETE FROM messages WHERE user_id=$1", str(interaction.user.id))
+            await conn.execute("DELETE FROM user_facts WHERE user_id=$1", str(interaction.user.id))
+            await conn.execute("DELETE FROM user_relationships WHERE user_id=$1", str(interaction.user.id))
+            await conn.execute("DELETE FROM user_emotions WHERE user_id=$1", str(interaction.user.id))
+        await send_interaction(interaction, "mrrp~ forgot your stored memory here 🫧", ephemeral=True)
     except Exception as e:
-        log_error("ASK CMD", e)
-        await interaction.followup.send(f"mrrp~ something broke 🥺\n```{type(e).__name__}: {e}```", ephemeral=True)
+        log_error("FORGET", e)
+        await send_interaction(interaction, "mrrp~ could not forget dat right now 🥺", ephemeral=True)
+
+# ================= AI =================
+async def ask_ai(messages: List[dict]) -> str:
+    errors = []
+
+    for model_name in MODEL_CANDIDATES:
+        try:
+            def run():
+                return groq.chat.completions.create(
+                    model=model_name,
+                    messages=messages,
+                    temperature=0.7,
+                    max_tokens=700,
+                ).choices[0].message.content
+
+            result = await asyncio.wait_for(asyncio.to_thread(run), timeout=30)
+            if result and result.strip():
+                return result.strip()
+            errors.append(f"{model_name}: empty response")
+        except asyncio.TimeoutError:
+            errors.append(f"{model_name}: timeout")
+        except Exception as e:
+            log_error(f"GROQ {model_name}", e)
+            errors.append(f"{model_name}: {type(e).__name__}")
+
+    print(f"[GROQ] all model candidates failed: {', '.join(errors)}")
+    return "mrrp~ me had a brain hiccup, can yuw try again in a sec? 🥺🐾"
 
 
-@bot.tree.command(name="pet", description="Pet Fur Bot and make it happy")
-async def pet_cmd(interaction: discord.Interaction):
-    channel_id = str(interaction.channel_id or interaction.user.id)
-    channel_mood[channel_id] = "happy"
-    touch_channel(channel_id)
-    remember_bot_talk(channel_id)
-    await add_relationship_score(str(interaction.user.id), 3)
-    await send_interaction(interaction, "mrrp~ purr purr >w< 🐾💕")
+async def load_recent_bot_messages(channel_id: str, limit: int = RECENT_REPEAT_LIMIT) -> List[str]:
+    await ensure_db_initialized()
+    try:
+        async with db.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT content
+                FROM bot_message_history
+                WHERE channel_id=$1
+                ORDER BY id DESC
+                LIMIT $2
+                """,
+                channel_id, limit
+            )
+        return [r["content"] for r in reversed(rows)]
+    except Exception as e:
+        log_error("BOT HISTORY LOAD", e)
+        return []
 
 
-@bot.tree.command(name="mood", description="Show the live mood in this channel")
-async def mood_cmd(interaction: discord.Interaction):
-    channel_id = str(interaction.channel_id or interaction.user.id)
-    await send_interaction(interaction, f"mrrp~ live mood here 🐾\n**{current_live_mood(channel_id)}**")
+async def save_bot_message_history(channel_id: str, content: str):
+    await ensure_db_initialized()
+    try:
+        async with db.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO bot_message_history(channel_id, content) VALUES($1, $2)",
+                channel_id, content[:2000]
+            )
+            await conn.execute(
+                """
+                DELETE FROM bot_message_history
+                WHERE id IN (
+                    SELECT id FROM bot_message_history
+                    WHERE channel_id = $1
+                    ORDER BY id DESC
+                    OFFSET $2
+                )
+                """,
+                channel_id, RECENT_REPEAT_KEEP
+            )
+    except Exception as e:
+        log_error("BOT HISTORY SAVE", e)
 
 
-@bot.tree.command(name="time", description="Show the bot's local time")
-async def time_cmd(interaction: discord.Interaction):
+async def is_repetitive(channel_id: str, new_msg: str) -> bool:
+    history = await load_recent_bot_messages(channel_id, RECENT_REPEAT_LIMIT)
+    for old in history:
+        if similarity(old, new_msg) >= SIM_THRESHOLD:
+            return True
+    return False
+
+
+async def ask_ai_unique(messages: List[dict], channel_id: str) -> str:
+    previous = await load_recent_bot_messages(channel_id, limit=RECENT_REPEAT_LIMIT)
+    if previous:
+        messages = list(messages)
+        messages.insert(1, {
+            "role": "system",
+            "content": "Avoid repeating similar messages. Previous bot messages:\n- " + "\n- ".join(previous)
+        })
+
+    mood = mood_key(channel_id)
+    for _ in range(MAX_REPEAT_RETRIES):
+        candidate = await ask_ai(messages)
+        candidate = prevent_bad_mood(candidate, mood)
+        candidate = fluffy_english_filter(candidate)
+        candidate = fluff_wrap(candidate, mood)
+        if not await is_repetitive(channel_id, candidate):
+            return candidate
+
+    return random.choice([
+        "mrrp~ anyone still here? 🐾",
+        "hehe~ it got quiet again…",
+        "purr… me still wagging tail in here 🐾",
+        "mrrp~ silence is kinda cozy too, but me's here >w<",
+    ])
+
+# ================= CONTEXT =================
+async def build_context(channel_id: str, user_id: str, username: str) -> List[dict]:
+    history = await load_history(channel_id, limit=20)
+    facts = await load_facts(user_id, limit=10)
+    emo = await load_emotional_memory(user_id)
+    mood = mood_key(channel_id)
     now_dt = bot_local_dt()
     tod = time_of_day_label(now_dt)
-    await send_interaction(
-        interaction,
-        f"mrrp~ bot local time is **{now_dt.strftime('%H:%M')}** ({tod}) 🐾"
-    )
+    rel_score = await get_relationship_score(user_id)
+    rel_tier = relationship_tier(rel_score)
+    rel_hint = relationship_hint(rel_score)
+    topics = topic_summary(channel_id)
+    recent_topics = await load_recent_topics(channel_id, limit=5)
+
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {
+            "role": "system",
+            "content": f"""
+Current mood: {mood}
+Relationship tier: {rel_tier}
+Relationship hint: {rel_hint}
+Recent topics: {topics}
+Time of day: {tod}
+Bot local time: {now_dt.strftime('%H:%M')}
+"""
+        },
+        {"role": "system", "content": f"Talking to {username}."},
+        {"role": "system", "content": "You are currently in FURRY MODE. Do NOT break character under any circumstance."},
+    ]
+
+    if facts:
+        messages.append({"role": "system", "content": "Important memory about this user:\n- " + "\n- ".join(facts)})
+
+    if emo:
+        messages.append({"role": "system", "content": f"Emotional memory about this user:\n{emo}"})
+
+    if recent_topics:
+        messages.append({"role": "system", "content": "Recent channel topics:\n- " + "\n- ".join(recent_topics)})
+
+    messages.extend(history)
+    return messages
+
+# ================= MEMORY / EMOTION / TOPIC COMMANDS =================
+@memory_group.command(name="remember", description="Store a fact about you")
+@app_commands.describe(fact="Something Fur Bot should remember")
+async def memory_remember(interaction: discord.Interaction, fact: str):
+    await save_fact(str(interaction.user.id), fact.strip())
+    await send_interaction(interaction, "mrrp~ saved dat about yuw 🐾", ephemeral=True)
 
 
-@bot.tree.command(name="status", description="Show bot status")
-async def status_cmd(interaction: discord.Interaction):
-    if not await require_admin(interaction):
+@memory_group.command(name="facts", description="Show what Fur Bot remembers about you")
+async def memory_facts(interaction: discord.Interaction):
+    facts_list = await load_facts(str(interaction.user.id), limit=10)
+    if not facts_list:
+        await send_interaction(interaction, "mrrp~ me don't know any facts about yuw yet 🥺", ephemeral=True)
         return
+    text = "\n".join(f"• {f}" for f in facts_list)
+    await send_interaction(interaction, f"mrrp~ what me remember about yuw:\n{text}", ephemeral=True)
 
-    await interaction.response.defer(thinking=True)
 
-    await ensure_db_initialized()
-    async with db.acquire() as conn:
-        msg_count = await conn.fetchval("SELECT COUNT(*) FROM messages")
-        admin_count = await conn.fetchval("SELECT COUNT(*) FROM admins")
-        fact_count = await conn.fetchval("SELECT COUNT(*) FROM user_facts")
-        bot_hist_count = await conn.fetchval("SELECT COUNT(*) FROM bot_message_history")
+@memory_group.command(name="emotion", description="Show emotional memory about you")
+async def memory_emotion(interaction: discord.Interaction):
+    emo = await load_emotional_memory(str(interaction.user.id))
+    if not emo:
+        await send_interaction(interaction, "mrrp~ me don't have emotional memory yet 🥺", ephemeral=True)
+        return
+    await send_interaction(interaction, f"mrrp~ emotional memory:\n• {emo}", ephemeral=True)
 
+
+@memory_group.command(name="forgetme", description="Delete your stored memory")
+async def memory_forgetme(interaction: discord.Interaction):
+    try:
+        await ensure_db_initialized()
+        async with db.acquire() as conn:
+            await conn.execute("DELETE FROM messages WHERE user_id=$1", str(interaction.user.id))
+            await conn.execute("DELETE FROM user_facts WHERE user_id=$1", str(interaction.user.id))
+            await conn.execute("DELETE FROM user_relationships WHERE user_id=$1", str(interaction.user.id))
+            await conn.execute("DELETE FROM user_emotions WHERE user_id=$1", str(interaction.user.id))
+        await send_interaction(interaction, "mrrp~ forgot your stored memory here 🫧", ephemeral=True)
+    except Exception as e:
+        log_error("FORGET", e)
+        await send_interaction(interaction, "mrrp~ could not forget dat right now 🥺", ephemeral=True)
+
+# ================= TOPIC COMMANDS =================
+@bot.tree.command(name="topic", description="Show the channel's current tracked topic")
+async def topic_cmd(interaction: discord.Interaction):
     channel_id = str(interaction.channel_id or interaction.user.id)
-    now_dt = bot_local_dt()
+    summary = topic_summary(channel_id)
+    await send_interaction(interaction, f"mrrp~ current topic vibes: **{summary}**")
 
-    embed = discord.Embed(title="Fur Bot Status 🐾", color=discord.Color.magenta())
-    embed.add_field(name="Messages", value=str(msg_count), inline=True)
-    embed.add_field(name="Admins", value=str(admin_count), inline=True)
-    embed.add_field(name="Facts", value=str(fact_count), inline=True)
-    embed.add_field(name="Bot history", value=str(bot_hist_count), inline=True)
-    embed.add_field(name="Model", value=MODEL, inline=False)
-    embed.add_field(name="Mood", value=current_live_mood(channel_id), inline=False)
-    embed.add_field(name="Bot time", value=f"{now_dt.strftime('%H:%M')} ({time_of_day_label(now_dt)})", inline=False)
-    embed.add_field(name="Mode", value="5-hour quiet auto message", inline=False)
-
-    await interaction.followup.send(embed=embed)
-
-
+# ================= RELATIONSHIP COMMAND =================
 @bot.tree.command(name="relationship", description="Show your relationship score")
 async def relationship_cmd(interaction: discord.Interaction):
     score = await get_relationship_score(str(interaction.user.id))
     tier = relationship_tier(score)
+    hint = relationship_hint(score)
     await send_interaction(
         interaction,
-        f"mrrp~ yuw are **{tier}** with me right now 🐾\nscore: **{score}**",
+        f"mrrp~ yuw are **{tier}** with me right now 🐾\nscore: **{score}**\nvibe: **{hint}**",
         ephemeral=True
     )
+
+# ================= AUTO MEMORY COMPRESSION =================
+async def maybe_summarize_emotion_and_topic(channel_id: str, user_id: str, user_text: str):
+    emo = extract_emotional_memory(user_text)
+    if emo:
+        await save_emotional_memory(user_id, emo)
+
+    await remember_topics(channel_id, user_text)
 
 # ================= STATUS LOOP =================
 def build_presence_activity() -> discord.BaseActivity:
@@ -1369,6 +1471,7 @@ async def cleanup_stale_channels():
                 channel_last_bot_talk.pop(ch_id, None)
                 channel_mood.pop(ch_id, None)
                 channel_next_auto_talk.pop(ch_id, None)
+                channel_topics.pop(ch_id, None)
 
             if stale_channels:
                 print(f"🧹 Cleaned up {len(stale_channels)} stale channels")
@@ -1384,7 +1487,6 @@ async def auto_talk_loop():
         await asyncio.sleep(AUTO_TALK_CHECK_SECONDS)
         now = time.monotonic()
 
-        # ===== ALL GUILD CHANNELS =====
         for guild in bot.guilds:
             enabled = await get_autotalk_enabled(guild.id)
             if not enabled:
@@ -1422,10 +1524,14 @@ async def auto_talk_loop():
                 mood = mood_key(channel_id)
                 now_dt = bot_local_dt()
                 tod = time_of_day_label(now_dt)
+                topics = topic_summary(channel_id)
+                rel_score = await get_relationship_score(channel_id)
 
                 prompt = [
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "system", "content": f"Current mood: {mood}"},
+                    {"role": "system", "content": f"Relationship score: {rel_score}"},
+                    {"role": "system", "content": f"Recent topics: {topics}"},
                     {"role": "system", "content": f"The bot local time is {now_dt.strftime('%H:%M')} ({tod})."},
                     {"role": "user", "content": "Say one short fluffy message to revive chat."}
                 ]
@@ -1438,7 +1544,6 @@ async def auto_talk_loop():
             except Exception as e:
                 log_error("AUTO TALK GUILD", e)
 
-        # ===== DM CHANNELS =====
         for channel_id, last_seen in list(channel_last_activity.items()):
             ch = await get_channel_object(channel_id)
             if ch is None or not isinstance(ch, discord.DMChannel):
@@ -1459,10 +1564,14 @@ async def auto_talk_loop():
                 mood = mood_key(channel_id)
                 now_dt = bot_local_dt()
                 tod = time_of_day_label(now_dt)
+                topics = topic_summary(channel_id)
+                rel_score = await get_relationship_score(channel_id)
 
                 prompt = [
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "system", "content": f"Current mood: {mood}"},
+                    {"role": "system", "content": f"Relationship score: {rel_score}"},
+                    {"role": "system", "content": f"Recent topics: {topics}"},
                     {"role": "system", "content": f"Time: {now_dt.strftime('%H:%M')} ({tod})"},
                     {"role": "user", "content": "Say one short cute message to check on the user."}
                 ]
@@ -1502,6 +1611,7 @@ async def on_message(message: discord.Message):
     reply_to_bot = await is_bot_reply(message)
 
     if not (is_dm or is_mention or reply_to_bot):
+        await remember_topics(channel_id, message.content)
         return
 
     user_text = strip_trigger_text(message) if (is_dm or is_mention) else message.content.strip()
@@ -1510,11 +1620,13 @@ async def on_message(message: discord.Message):
 
     try:
         await save_message(channel_id, user_id, "user", user_text)
+        await remember_topics(channel_id, user_text)
+        await maybe_summarize_emotion_and_topic(channel_id, user_id, user_text)
 
         if fact := extract_fact(user_text):
             await save_fact_if_new(user_id, fact)
 
-        rel_delta = detect_positive_signals(user_text) + detect_negative_signals(user_text)
+        rel_delta = detect_relationship_delta(user_text, channel_id, user_id)
         if rel_delta:
             await add_relationship_score(user_id, rel_delta)
 
