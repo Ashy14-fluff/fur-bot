@@ -51,6 +51,7 @@ MODEL_CANDIDATES = build_model_candidates()
 # ================= BOT =================
 intents = discord.Intents.default()
 intents.message_content = True
+intents.members = True   # important for member/role-related behavior
 intents.presences = True  # only if enabled in Dev Portal
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -330,7 +331,6 @@ def fluff_wrap(reply: str, mood: str) -> str:
 
 
 def fluffy_english_filter(text: str) -> str:
-    # longer / more specific patterns FIRST
     replacements = [
         (r"\bgood morning\b", "gud mornin~ ☀️"),
         (r"\bgood night\b", "gud night~ 🌙"),
@@ -561,7 +561,6 @@ def extract_fact(text: str) -> Optional[str]:
             if value:
                 return f"{label}: {value}"
 
-    # only store "I am" / "I'm" if it seems more permanent
     m = re.search(r"\bi (?:am|\'m)\s+(.+)$", text, re.IGNORECASE)
     if m:
         value = m.group(1).strip(" .!?")
@@ -569,6 +568,17 @@ def extract_fact(text: str) -> Optional[str]:
             return f"is: {value}"
 
     return None
+
+# ================= CHANNEL HISTORY CLEANUP =================
+async def clear_channel_history(channel_id: str):
+    await ensure_db_initialized()
+    try:
+        async with db.acquire() as conn:
+            await conn.execute("DELETE FROM messages WHERE channel_id=$1", channel_id)
+            await conn.execute("DELETE FROM bot_message_history WHERE channel_id=$1", channel_id)
+    except Exception as e:
+        log_error("CLEAR CHANNEL HISTORY", e)
+        raise
 
 # ================= GUILD SETTINGS =================
 async def ensure_guild_row(guild_id: int):
@@ -919,10 +929,13 @@ async def memory_facts(interaction: discord.Interaction):
 async def memory_forgetme(interaction: discord.Interaction):
     try:
         await ensure_db_initialized()
+
+        # collect channels first if you later want to extend this safely
         async with db.acquire() as conn:
             await conn.execute("DELETE FROM messages WHERE user_id=$1", str(interaction.user.id))
             await conn.execute("DELETE FROM user_facts WHERE user_id=$1", str(interaction.user.id))
             await conn.execute("DELETE FROM user_relationships WHERE user_id=$1", str(interaction.user.id))
+
         await send_interaction(interaction, "mrrp~ forgot your stored memory here 🫧", ephemeral=True)
     except Exception as e:
         log_error("FORGET", e)
@@ -1192,9 +1205,7 @@ async def admin_clearhistory(interaction: discord.Interaction):
     if not await require_admin(interaction):
         return
     try:
-        await ensure_db_initialized()
-        async with db.acquire() as conn:
-            await conn.execute("DELETE FROM messages WHERE channel_id=$1", str(interaction.channel_id))
+        await clear_channel_history(str(interaction.channel_id))
         await send_interaction(interaction, "mrrp~ history cleared 🧹✨", ephemeral=True)
     except Exception as e:
         log_error("CLEAR HISTORY", e)
