@@ -7,7 +7,7 @@ import random
 from collections import Counter, defaultdict, deque
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from typing import Optional, Set, Dict, List, Tuple
+from typing import Optional, Set, Dict, List
 from difflib import SequenceMatcher
 
 import asyncpg
@@ -67,8 +67,6 @@ channel_last_activity: Dict[str, float] = {}
 channel_last_bot_talk: Dict[str, float] = {}
 channel_mood: Dict[str, str] = {}
 channel_next_auto_talk: Dict[str, float] = {}
-
-# topic tracking
 channel_topics: Dict[str, deque] = defaultdict(lambda: deque(maxlen=3))
 
 AUTO_TALK_CHECK_SECONDS = 60
@@ -281,7 +279,6 @@ def time_of_day_label(dt: datetime) -> str:
 
 def mood_from_text(text: str) -> str:
     low = text.lower()
-
     if any(w in low for w in ["sleepy", "tired", "eepy", "zzz", "good night", "night"]):
         return "sleepy"
     if any(w in low for w in ["sad", "lonely", "hurt", "down", "cry", "depressed"]):
@@ -376,7 +373,6 @@ def fluffy_english_filter(text: str) -> str:
 def prevent_bad_mood(reply: str, mood: str) -> str:
     bad_words = ["growl", "snarl", "angry", "mad", "hate", "attack", "furious", "grumpy", "annoyed", "snappy"]
     low = reply.lower()
-
     if mood == "happy" and any(w in low for w in bad_words):
         return "mrrp~ hehe~ me is happy and waggy todayy 🐾✨"
     if mood == "soft" and any(w in low for w in bad_words):
@@ -485,13 +481,10 @@ def extract_topics(text: str) -> List[str]:
         if w.endswith("'s"):
             w = w[:-2]
         topics.append(w)
-
     if not topics:
         return []
-
     counts = Counter(topics)
-    ordered = [word for word, _ in counts.most_common(3)]
-    return ordered
+    return [word for word, _ in counts.most_common(3)]
 
 
 async def remember_topics(channel_id: str, text: str):
@@ -690,13 +683,11 @@ def extract_fact(text: str) -> Optional[str]:
             value = m.group(1).strip(" .!?")
             if value:
                 return f"{label}: {value}"
-
     m = re.search(r"\bi (?:am|\'m)\s+(.+)$", text, re.IGNORECASE)
     if m:
         value = m.group(1).strip(" .!?")
         if not any(w in value.lower() for w in ["hungry", "tired", "sleepy", "bored"]):
             return f"is: {value}"
-
     return None
 
 
@@ -995,19 +986,16 @@ def detect_relationship_delta(text: str, channel_id: str, user_id: str) -> int:
     score = 0
     score += detect_positive_signals(text)
     score += detect_negative_signals(text)
-
     mood = mood_key(channel_id)
     if mood in {"soft", "happy"}:
         score += 1
     elif mood == "sleepy":
         score += 0
-
     topics = list(channel_topics.get(channel_id, []))
     if topics:
         low = text.lower()
         if any(t in low for t in topics[-2:]):
             score += 1
-
     return score
 
 # ================= ADMIN AUTO-TOGGLE =================
@@ -1065,7 +1053,6 @@ async def admin_autotalk_channel(interaction: discord.Interaction, channel: disc
     if channel.guild.id != interaction.guild.id:
         await send_interaction(interaction, "mrrp~ pick a channel from this server only 🥺", ephemeral=True)
         return
-
     await set_autotalk_channel_id(interaction.guild.id, channel.id)
     await send_interaction(interaction, f"mrrp~ auto-talk channel set to {channel.mention} 🐾", ephemeral=True)
 
@@ -1075,16 +1062,13 @@ async def admin_autotalk_channel(interaction: discord.Interaction, channel: disc
 async def admin_add(interaction: discord.Interaction, member: discord.Member):
     if not await require_admin(interaction):
         return
-
     await ensure_db_initialized()
     async with db.acquire() as conn:
         await conn.execute(
             "INSERT INTO admins(user_id) VALUES($1) ON CONFLICT (user_id) DO NOTHING",
             str(member.id)
         )
-
     admins.add(str(member.id))
-
     role_added = False
     if interaction.guild is not None:
         role = await get_admin_role(interaction.guild, create=True)
@@ -1094,15 +1078,12 @@ async def admin_add(interaction: discord.Interaction, member: discord.Member):
                 role_added = True
             except Exception as e:
                 log_error("ROLE ADD", e)
-
     await add_relationship_score(str(member.id), 5)
-
     msg = f"mrrp~ {member.display_name} is now admin 🐾"
     if role_added:
         msg += "\n✨ real admin role given!"
     else:
         msg += "\n🥺 role not given (check perms / role hierarchy)"
-
     await send_interaction(interaction, msg, ephemeral=True)
 
 
@@ -1111,13 +1092,10 @@ async def admin_add(interaction: discord.Interaction, member: discord.Member):
 async def admin_remove(interaction: discord.Interaction, member: discord.Member):
     if not await require_admin(interaction):
         return
-
     await ensure_db_initialized()
     async with db.acquire() as conn:
         await conn.execute("DELETE FROM admins WHERE user_id=$1", str(member.id))
-
     admins.discard(str(member.id))
-
     role_removed = False
     if interaction.guild is not None:
         role = await get_admin_role(interaction.guild, create=False)
@@ -1127,15 +1105,12 @@ async def admin_remove(interaction: discord.Interaction, member: discord.Member)
                 role_removed = True
             except Exception as e:
                 log_error("ROLE REMOVE", e)
-
     await add_relationship_score(str(member.id), -3)
-
     msg = f"mrrp~ removed admin {member.display_name} 🐾"
     if role_removed:
         msg += "\n✨ role removed!"
     else:
         msg += "\n🥺 role not removed (missing role / perms)"
-
     await send_interaction(interaction, msg, ephemeral=True)
 
 
@@ -1178,7 +1153,7 @@ async def admin_clearhistory(interaction: discord.Interaction):
         log_error("CLEAR HISTORY", e)
         await send_interaction(interaction, "mrrp~ could not clear history 🥺", ephemeral=True)
 
-# ================= MEMORY COMMANDS =================
+# ================= MEMORY / EMOTION / TOPIC COMMANDS =================
 @memory_group.command(name="remember", description="Store a fact about you")
 @app_commands.describe(fact="Something Fur Bot should remember")
 async def memory_remember(interaction: discord.Interaction, fact: str):
@@ -1196,6 +1171,15 @@ async def memory_facts(interaction: discord.Interaction):
     await send_interaction(interaction, f"mrrp~ what me remember about yuw:\n{text}", ephemeral=True)
 
 
+@memory_group.command(name="emotion", description="Show emotional memory about you")
+async def memory_emotion(interaction: discord.Interaction):
+    emo = await load_emotional_memory(str(interaction.user.id))
+    if not emo:
+        await send_interaction(interaction, "mrrp~ me don't have emotional memory yet 🥺", ephemeral=True)
+        return
+    await send_interaction(interaction, f"mrrp~ emotional memory:\n• {emo}", ephemeral=True)
+
+
 @memory_group.command(name="forgetme", description="Delete your stored memory")
 async def memory_forgetme(interaction: discord.Interaction):
     try:
@@ -1210,10 +1194,28 @@ async def memory_forgetme(interaction: discord.Interaction):
         log_error("FORGET", e)
         await send_interaction(interaction, "mrrp~ could not forget dat right now 🥺", ephemeral=True)
 
+
+@bot.tree.command(name="topic", description="Show the channel's current tracked topic")
+async def topic_cmd(interaction: discord.Interaction):
+    channel_id = str(interaction.channel_id or interaction.user.id)
+    summary = topic_summary(channel_id)
+    await send_interaction(interaction, f"mrrp~ current topic vibes: **{summary}**")
+
+
+@bot.tree.command(name="relationship", description="Show your relationship score")
+async def relationship_cmd(interaction: discord.Interaction):
+    score = await get_relationship_score(str(interaction.user.id))
+    tier = relationship_tier(score)
+    hint = relationship_hint(score)
+    await send_interaction(
+        interaction,
+        f"mrrp~ yuw are **{tier}** with me right now 🐾\nscore: **{score}**\nvibe: **{hint}**",
+        ephemeral=True
+    )
+
 # ================= AI =================
 async def ask_ai(messages: List[dict]) -> str:
     errors = []
-
     for model_name in MODEL_CANDIDATES:
         try:
             def run():
@@ -1348,89 +1350,25 @@ Bot local time: {now_dt.strftime('%H:%M')}
 
     if facts:
         messages.append({"role": "system", "content": "Important memory about this user:\n- " + "\n- ".join(facts)})
-
     if emo:
         messages.append({"role": "system", "content": f"Emotional memory about this user:\n{emo}"})
-
     if recent_topics:
         messages.append({"role": "system", "content": "Recent channel topics:\n- " + "\n- ".join(recent_topics)})
 
     messages.extend(history)
     return messages
 
-# ================= MEMORY / EMOTION / TOPIC COMMANDS =================
-@memory_group.command(name="remember", description="Store a fact about you")
-@app_commands.describe(fact="Something Fur Bot should remember")
-async def memory_remember(interaction: discord.Interaction, fact: str):
-    await save_fact(str(interaction.user.id), fact.strip())
-    await send_interaction(interaction, "mrrp~ saved dat about yuw 🐾", ephemeral=True)
-
-
-@memory_group.command(name="facts", description="Show what Fur Bot remembers about you")
-async def memory_facts(interaction: discord.Interaction):
-    facts_list = await load_facts(str(interaction.user.id), limit=10)
-    if not facts_list:
-        await send_interaction(interaction, "mrrp~ me don't know any facts about yuw yet 🥺", ephemeral=True)
-        return
-    text = "\n".join(f"• {f}" for f in facts_list)
-    await send_interaction(interaction, f"mrrp~ what me remember about yuw:\n{text}", ephemeral=True)
-
-
-@memory_group.command(name="emotion", description="Show emotional memory about you")
-async def memory_emotion(interaction: discord.Interaction):
-    emo = await load_emotional_memory(str(interaction.user.id))
-    if not emo:
-        await send_interaction(interaction, "mrrp~ me don't have emotional memory yet 🥺", ephemeral=True)
-        return
-    await send_interaction(interaction, f"mrrp~ emotional memory:\n• {emo}", ephemeral=True)
-
-
-@memory_group.command(name="forgetme", description="Delete your stored memory")
-async def memory_forgetme(interaction: discord.Interaction):
-    try:
-        await ensure_db_initialized()
-        async with db.acquire() as conn:
-            await conn.execute("DELETE FROM messages WHERE user_id=$1", str(interaction.user.id))
-            await conn.execute("DELETE FROM user_facts WHERE user_id=$1", str(interaction.user.id))
-            await conn.execute("DELETE FROM user_relationships WHERE user_id=$1", str(interaction.user.id))
-            await conn.execute("DELETE FROM user_emotions WHERE user_id=$1", str(interaction.user.id))
-        await send_interaction(interaction, "mrrp~ forgot your stored memory here 🫧", ephemeral=True)
-    except Exception as e:
-        log_error("FORGET", e)
-        await send_interaction(interaction, "mrrp~ could not forget dat right now 🥺", ephemeral=True)
-
-# ================= TOPIC COMMANDS =================
-@bot.tree.command(name="topic", description="Show the channel's current tracked topic")
-async def topic_cmd(interaction: discord.Interaction):
-    channel_id = str(interaction.channel_id or interaction.user.id)
-    summary = topic_summary(channel_id)
-    await send_interaction(interaction, f"mrrp~ current topic vibes: **{summary}**")
-
-# ================= RELATIONSHIP COMMAND =================
-@bot.tree.command(name="relationship", description="Show your relationship score")
-async def relationship_cmd(interaction: discord.Interaction):
-    score = await get_relationship_score(str(interaction.user.id))
-    tier = relationship_tier(score)
-    hint = relationship_hint(score)
-    await send_interaction(
-        interaction,
-        f"mrrp~ yuw are **{tier}** with me right now 🐾\nscore: **{score}**\nvibe: **{hint}**",
-        ephemeral=True
-    )
-
-# ================= AUTO MEMORY COMPRESSION =================
+# ================= MEMORY / EMOTION / TOPIC UTIL =================
 async def maybe_summarize_emotion_and_topic(channel_id: str, user_id: str, user_text: str):
     emo = extract_emotional_memory(user_text)
     if emo:
         await save_emotional_memory(user_id, emo)
-
     await remember_topics(channel_id, user_text)
 
 # ================= STATUS LOOP =================
 def build_presence_activity() -> discord.BaseActivity:
     active_moods = [m for m in channel_mood.values() if m]
     mood = random.choice(active_moods) if active_moods else "neutral"
-
     if mood == "happy":
         return discord.Activity(type=discord.ActivityType.watching, name="yuw and wagging tail happily 🐾✨")
     if mood == "soft":
@@ -1460,29 +1398,24 @@ async def cleanup_stale_channels():
             await asyncio.sleep(CLEANUP_STALE_CHANNELS_SECONDS)
             now = time.monotonic()
             cutoff = now - STALE_CHANNEL_AGE
-
             stale_channels = [
                 ch_id for ch_id, last_seen in channel_last_activity.items()
                 if last_seen < cutoff
             ]
-
             for ch_id in stale_channels:
                 channel_last_activity.pop(ch_id, None)
                 channel_last_bot_talk.pop(ch_id, None)
                 channel_mood.pop(ch_id, None)
                 channel_next_auto_talk.pop(ch_id, None)
                 channel_topics.pop(ch_id, None)
-
             if stale_channels:
                 print(f"🧹 Cleaned up {len(stale_channels)} stale channels")
-
         except Exception as e:
             log_error("CLEANUP LOOP", e)
 
 # ================= AUTO TALK =================
 async def auto_talk_loop():
     await bot.wait_until_ready()
-
     while not bot.is_closed():
         await asyncio.sleep(AUTO_TALK_CHECK_SECONDS)
         now = time.monotonic()
@@ -1540,7 +1473,6 @@ async def auto_talk_loop():
                 await ch.send(msg, allowed_mentions=discord.AllowedMentions.none())
                 await save_bot_message_history(channel_id, msg)
                 remember_bot_talk(channel_id)
-
             except Exception as e:
                 log_error("AUTO TALK GUILD", e)
 
@@ -1580,7 +1512,6 @@ async def auto_talk_loop():
                 await ch.send(msg)
                 await save_bot_message_history(channel_id, msg)
                 remember_bot_talk(channel_id)
-
             except Exception as e:
                 log_error("AUTO TALK DM", e)
 
@@ -1639,7 +1570,6 @@ async def on_message(message: discord.Message):
         remember_bot_talk(channel_id)
 
         await send_with_typing(message.channel, reply)
-
     except Exception as e:
         log_error("ON_MESSAGE", e)
         try:
