@@ -466,8 +466,14 @@ TOPIC_STOPWORDS = {
     "the", "and", "for", "with", "that", "this", "have", "just", "like", "what", "when", "where",
     "why", "how", "you", "your", "yuw", "me", "my", "mine", "a", "an", "to", "of", "in", "on",
     "is", "are", "was", "were", "be", "been", "it", "we", "they", "he", "she", "them", "us",
-    "about", "from", "but", "not", "can", "could", "would", "should"
+    "about", "from", "but", "not", "can", "could", "would", "should",
+
+    # filler / chat noise
+    "ok", "okay", "okie", "yeah", "yep", "nope", "nah", "hmm", "hmmm", "uh", "uhh",
+    "hehe", "uwu", "owo", "lol", "lmao", "pls", "plz", "bro", "bruh",
+    "hi", "hello", "hey", "yo", "yes", "no", "omg", "idk", "btw",
 }
+
 
 
 def extract_topics(text: str) -> List[str]:
@@ -480,11 +486,21 @@ def extract_topics(text: str) -> List[str]:
             continue
         if w.endswith("'s"):
             w = w[:-2]
+        if w in TOPIC_STOPWORDS:
+            continue
         topics.append(w)
+
     if not topics:
         return []
+
     counts = Counter(topics)
-    return [word for word, _ in counts.most_common(3)]
+    ordered: List[str] = []
+    for word, _ in counts.most_common(8):
+        if word not in ordered:
+            ordered.append(word)
+        if len(ordered) >= 3:
+            break
+    return ordered
 
 
 async def remember_topics(channel_id: str, text: str):
