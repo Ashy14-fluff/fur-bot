@@ -26,6 +26,7 @@ MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 MODEL_FALLBACKS_RAW = os.getenv("GROQ_MODEL_FALLBACKS", "")
 GUILD_ID = os.getenv("GUILD_ID")
 BOT_TIMEZONE = os.getenv("BOT_TIMEZONE", "Asia/Jakarta")
+ENABLE_PRESENCES = os.getenv("ENABLE_PRESENCES", "false").strip().lower() in {"1", "true", "yes", "on"}
 
 if not DISCORD_TOKEN or not GROQ_API_KEY or not DATABASE_URL:
     raise RuntimeError("Missing env variables")
@@ -41,6 +42,15 @@ groq = Groq(api_key=GROQ_API_KEY)
 
 
 def build_model_candidates() -> List[str]:
+    candidates = [MODEL] if MODEL and MODEL.strip() else []
+    if MODEL_FALLBACKS_RAW.strip():
+        candidates.extend(x.strip() for x in MODEL_FALLBACKS_RAW.split(",") if x.strip())
+
+    # Deduplicate while preserving order
+    deduped = list(dict.fromkeys(candidates))
+    if not deduped:
+        deduped = ["llama-3.1-8b-instant"]
+    return deduped
     candidates = [MODEL]
     if MODEL_FALLBACKS_RAW.strip():
         candidates.extend(x.strip() for x in MODEL_FALLBACKS_RAW.split(",") if x.strip())
@@ -52,12 +62,17 @@ MODEL_CANDIDATES = build_model_candidates()
 # ================= BOT =================
 intents = discord.Intents.default()
 intents.message_content = True
+# Only enable presences if you truly turned it on in the Discord Developer Portal.
+# If not, set this to False.
+intents.presences = ENABLE_PRESENCES
 intents.members = True
 intents.presences = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 db: Optional[asyncpg.Pool] = None
 db_lock = asyncio.Lock()
+db_init_last_failure_monotonic: float = 0.0
+DB_INIT_RETRY_COOLDOWN_SECONDS = 30
 
 admins: Set[str] = set()
 bot_owner_id: Optional[int] = None
@@ -130,7 +145,7 @@ def log_error(where: str, exc: Exception):
 
 # ================= DB =================
 async def init_db():
-    global db
+    global db, db_init_last_failure_monotonic
     if db:
         return
 
@@ -240,15 +255,39 @@ async def init_db():
             print("🟢 DB ready")
         except Exception as e:
             db = None
+            db_init_last_failure_monotonic = time.monotonic()
             log_error("DB INIT", e)
             raise
 
 
 async def ensure_db_initialized():
+    global db_init_last_failure_monotonic
+
+    if db is None:
+        now = time.monotonic()
+        if (
+            db_init_last_failure_monotonic > 0
+            and now - db_init_last_failure_monotonic < DB_INIT_RETRY_COOLDOWN_SECONDS
+        ):
+            retry_in = int(DB_INIT_RETRY_COOLDOWN_SECONDS - (now - db_init_last_failure_monotonic))
+            raise RuntimeError(f"Database init retry cooldown active ({retry_in}s)")
+        await init_db()
+
     if db is None:
         await init_db()
     if db is None:
         raise RuntimeError("Database is not initialized")
+
+
+def friendly_error_message(exc: Exception) -> str:
+    msg = str(exc).lower()
+    if "database is not initialized" in msg:
+        return "mrrp~ my memory den is still waking up, pwease try again in a few seconds 🐾"
+    if "database init retry cooldown active" in msg:
+        return "mrrp~ still trying to wake my memory den, pwease wait a tiny bit and try again 🐾"
+    if "permission" in msg or "forbidden" in msg:
+        return "mrrp~ i don't have permission for that here 🥺"
+    return "mrrp~ something broke 🥺"
 
 # ================= HELPERS =================
 def touch_channel(channel_id: str):
@@ -279,6 +318,19 @@ def time_of_day_label(dt: datetime) -> str:
 
 def mood_from_text(text: str) -> str:
     low = text.lower()
+
+    if any(w in low for w in ["sleepy", "tired", "eepy", "zzz", "good night", "night"]):
+        return "sleepy"
+
+    if any(w in low for w in ["sad", "lonely", "hurt", "down", "cry", "depressed"]):
+        return "soft"
+
+    if any(w in low for w in ["play", "game", "chaos", "mischief", "tease", "funny"]):
+        return "playful"
+
+    if any(w in low for w in ["happy", "yay", "excited", "hehe", "uwu", "owo", "love"]):
+        return "happy"
+
     if any(w in low for w in ["sleepy", "tired", "eepy", "zzz", "good night", "night"]):
         return "sleepy"
     if any(w in low for w in ["sad", "lonely", "hurt", "down", "cry", "depressed"]):
@@ -895,6 +947,36 @@ async def require_admin(interaction: discord.Interaction) -> bool:
     await send_interaction(interaction, "mrrp~ no permission 🥺", ephemeral=True)
     return False
 
+# ================= AI =================
+async def ask_ai(messages: List[dict]) -> str:
+    errors = []
+
+    for model_name in MODEL_CANDIDATES:
+        try:
+            def run():
+                return groq.chat.completions.create(
+                    model=model_name,
+                    messages=messages,
+                    temperature=0.7,
+                    max_tokens=700,
+                ).choices[0].message.content
+
+            result = await asyncio.wait_for(asyncio.to_thread(run), timeout=30)
+            if result and result.strip():
+                return result.strip()
+            errors.append(f"{model_name}: empty response")
+
+        except asyncio.TimeoutError:
+            errors.append(f"{model_name}: timeout")
+        except Exception as e:
+            log_error(f"GROQ {model_name}", e)
+            errors.append(f"{model_name}: {type(e).__name__}")
+
+    print(f"[GROQ] all model candidates failed: {', '.join(errors)}")
+    return "mrrp~ me had a brain hiccup, can yuw try again in a sec? 🥺🐾"
+
+
+async def load_recent_bot_messages(channel_id: str, limit: int = RECENT_REPEAT_LIMIT) -> List[str]:
 # ================= RELATIONSHIP SYSTEM =================
 def relationship_tier(score: int) -> str:
     if score >= 120:
@@ -956,6 +1038,7 @@ async def add_relationship_score(user_id: str, delta: int):
         log_error("REL SAVE", e)
 
 
+async def save_bot_message_history(channel_id: str, content: str):
 async def set_relationship_score(user_id: str, score: int):
     await ensure_db_initialized()
     try:
@@ -1014,6 +1097,195 @@ def detect_relationship_delta(text: str, channel_id: str, user_id: str) -> int:
             score += 1
     return score
 
+    for _ in range(MAX_REPEAT_RETRIES):
+        candidate = await ask_ai(messages)
+        candidate = prevent_bad_mood(candidate, mood)
+        candidate = fluffy_english_filter(candidate)
+        candidate = fluff_wrap(candidate, mood)
+        if not await is_repetitive(channel_id, candidate):
+            return candidate
+
+    return random.choice([
+        "mrrp~ anyone still here? 🐾",
+        "hehe~ it got quiet again…",
+        "purr… me still wagging tail in here 🐾",
+        "mrrp~ silence is kinda cozy too, but me's here >w<",
+    ])
+
+# ================= CONTEXT =================
+async def build_context(channel_id: str, user_id: str, username: str) -> List[dict]:
+    history = await load_history(channel_id, limit=20)
+    facts = await load_facts(user_id, limit=10)
+    mood = mood_key(channel_id)
+    now_dt = bot_local_dt()
+    tod = time_of_day_label(now_dt)
+
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {
+            "role": "system",
+            "content": f"""
+Current mood: {mood}
+
+STRICT MOOD RULES:
+- If mood is happy -> ONLY cheerful, cute, positive, waggy, soft energy
+- If mood is soft -> ONLY gentle, comforting, calm, cozy energy
+- If mood is sleepy -> ONLY sleepy, slow, cozy, soft-spoken energy
+- If mood is playful -> ONLY playful, light, silly, teasing energy
+- Never become angry, hostile, threatening, rude, aggressive, or mean
+- Never describe growling, snarling, or emotional harm
+- If your reply conflicts with the mood, rewrite it to match the mood
+
+Time of day: {tod}
+Bot local time: {now_dt.strftime('%H:%M')}
+"""
+        },
+        {"role": "system", "content": f"Talking to {username}."},
+        {"role": "system", "content": "You are currently in FURRY MODE. Do NOT break character under any circumstance."},
+    ]
+
+    if facts:
+        messages.append({
+            "role": "system",
+            "content": "Important memory about this user:\n- " + "\n- ".join(facts)
+        })
+
+    messages.extend(history)
+    return messages
+
+# ================= MEMORY COMMANDS =================
+@memory_group.command(name="remember", description="Store a fact about you")
+@app_commands.describe(fact="Something Fur Bot should remember")
+async def memory_remember(interaction: discord.Interaction, fact: str):
+    await save_fact(str(interaction.user.id), fact.strip())
+    await send_interaction(interaction, "mrrp~ saved dat about yuw 🐾", ephemeral=True)
+
+
+@memory_group.command(name="facts", description="Show what Fur Bot remembers about you")
+async def memory_facts(interaction: discord.Interaction):
+    facts_list = await load_facts(str(interaction.user.id), limit=10)
+    if not facts_list:
+        await send_interaction(interaction, "mrrp~ me don't know any facts about yuw yet 🥺", ephemeral=True)
+        return
+    text = "\n".join(f"• {f}" for f in facts_list)
+    await send_interaction(interaction, f"mrrp~ what me remember about yuw:\n{text}", ephemeral=True)
+
+
+@memory_group.command(name="forgetme", description="Delete your stored memory")
+async def memory_forgetme(interaction: discord.Interaction):
+    try:
+        await ensure_db_initialized()
+        async with db.acquire() as conn:
+            await conn.execute("DELETE FROM messages WHERE user_id=$1", str(interaction.user.id))
+            await conn.execute("DELETE FROM user_facts WHERE user_id=$1", str(interaction.user.id))
+            await conn.execute("DELETE FROM user_relationships WHERE user_id=$1", str(interaction.user.id))
+        await send_interaction(interaction, "mrrp~ forgot your stored memory here 🫧", ephemeral=True)
+    except Exception as e:
+        log_error("FORGET", e)
+        await send_interaction(interaction, "mrrp~ could not forget dat right now 🥺", ephemeral=True)
+
+# ================= RELATIONSHIP SYSTEM =================
+async def get_relationship_score(user_id: str) -> int:
+    await ensure_db_initialized()
+    try:
+        async with db.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT score FROM user_relationships WHERE user_id=$1",
+                user_id
+            )
+        if row:
+            return int(row["score"])
+        return 0
+    except Exception as e:
+        log_error("REL LOAD", e)
+        return 0
+
+
+async def add_relationship_score(user_id: str, delta: int):
+    await ensure_db_initialized()
+    try:
+        async with db.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO user_relationships(user_id, score, last_updated)
+                VALUES($1, $2, NOW())
+                ON CONFLICT(user_id)
+                DO UPDATE SET score = GREATEST($3, LEAST($4, user_relationships.score + $2)),
+                              last_updated = NOW()
+                """,
+                user_id, delta, RELATIONSHIP_SCORE_MIN, RELATIONSHIP_SCORE_MAX
+            )
+    except Exception as e:
+        log_error("REL SAVE", e)
+
+
+async def set_relationship_score(user_id: str, score: int):
+    await ensure_db_initialized()
+    try:
+        clamped_score = max(RELATIONSHIP_SCORE_MIN, min(RELATIONSHIP_SCORE_MAX, score))
+        async with db.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO user_relationships(user_id, score, last_updated)
+                VALUES($1, $2, NOW())
+                ON CONFLICT(user_id)
+                DO UPDATE SET score=$2, last_updated=NOW()
+                """,
+                user_id, clamped_score
+            )
+    except Exception as e:
+        log_error("REL SET", e)
+
+
+def relationship_tier(score: int) -> str:
+    if score >= 120:
+        return "bestie"
+    if score >= 60:
+        return "close"
+    if score >= 20:
+        return "friendly"
+    if score >= 0:
+        return "warm"
+    if score >= -30:
+        return "guarded"
+    return "distant"
+
+
+def relationship_hint(score: int) -> str:
+    tier = relationship_tier(score)
+    return {
+        "bestie": "super close and affectionate",
+        "close": "very comfy and familiar",
+        "friendly": "warm and upbeat",
+        "warm": "kind and open",
+        "guarded": "slightly cautious but still polite",
+        "distant": "more reserved and careful",
+    }.get(tier, "kind")
+
+
+def detect_positive_signals(text: str) -> int:
+    low = text.lower()
+    score = 0
+    if any(w in low for w in ["thanks", "thank you", "cute", "good", "love", "nice", "sweet"]):
+        score += 2
+    if any(w in low for w in ["pet", "boop", "hug", "headpat", "cuddle"]):
+        score += 3
+    if any(w in low for w in ["uwu", "owo", ">w<", "hehe"]):
+        score += 1
+    if len(text) > 10:
+        score += 1
+    return score
+
+
+def detect_negative_signals(text: str) -> int:
+    low = text.lower()
+    score = 0
+    if any(w in low for w in ["shut up", "stupid", "hate you", "bad bot"]):
+        score -= 5
+    if any(w in low for w in ["angry", "annoyed", "mad"]):
+        score -= 2
+    return score
+
 # ================= ADMIN AUTO-TOGGLE =================
 async def set_autotalk_for_guild(guild_id: int, enabled: bool):
     await set_autotalk_enabled(guild_id, enabled)
@@ -1025,6 +1297,14 @@ async def admin_autotalk_on(interaction: discord.Interaction):
         return
     if not interaction.guild:
         await send_interaction(interaction, "mrrp~ this command works in a server only 🥺", ephemeral=True)
+        return
+    configured_channel = await get_autotalk_channel_id(interaction.guild.id)
+    if configured_channel is None:
+        await send_interaction(
+            interaction,
+            "mrrp~ set auto-talk channel first with `/admin autotalk_channel` 🐾",
+            ephemeral=True
+        )
         return
     await set_autotalk_for_guild(interaction.guild.id, True)
     await send_interaction(interaction, "mrrp~ auto-talk is now ON for this server 🐾✨", ephemeral=True)
@@ -1069,6 +1349,22 @@ async def admin_autotalk_channel(interaction: discord.Interaction, channel: disc
     if channel.guild.id != interaction.guild.id:
         await send_interaction(interaction, "mrrp~ pick a channel from this server only 🥺", ephemeral=True)
         return
+
+    await set_autotalk_channel_id(interaction.guild.id, channel.id)
+    await send_interaction(interaction, f"mrrp~ auto-talk channel set to {channel.mention} 🐾", ephemeral=True)
+
+
+@admin_group.command(name="autotalk_channel_clear", description="Clear auto-talk channel for this server")
+async def admin_autotalk_channel_clear(interaction: discord.Interaction):
+    if not await require_admin(interaction):
+        return
+    if not interaction.guild:
+        await send_interaction(interaction, "mrrp~ this command works in a server only 🥺", ephemeral=True)
+        return
+
+    await set_autotalk_channel_id(interaction.guild.id, None)
+    await send_interaction(interaction, "mrrp~ auto-talk channel cleared. set one again with /admin autotalk_channel 🐾", ephemeral=True)
+
     await set_autotalk_channel_id(interaction.guild.id, channel.id)
     await send_interaction(interaction, f"mrrp~ auto-talk channel set to {channel.mention} 🐾", ephemeral=True)
 
@@ -1078,6 +1374,7 @@ async def admin_autotalk_channel(interaction: discord.Interaction, channel: disc
 async def admin_add(interaction: discord.Interaction, member: discord.Member):
     if not await require_admin(interaction):
         return
+
     await ensure_db_initialized()
     async with db.acquire() as conn:
         await conn.execute(
@@ -1108,6 +1405,7 @@ async def admin_add(interaction: discord.Interaction, member: discord.Member):
 async def admin_remove(interaction: discord.Interaction, member: discord.Member):
     if not await require_admin(interaction):
         return
+
     await ensure_db_initialized()
     async with db.acquire() as conn:
         await conn.execute("DELETE FROM admins WHERE user_id=$1", str(member.id))
@@ -1163,6 +1461,9 @@ async def admin_clearhistory(interaction: discord.Interaction):
     if not await require_admin(interaction):
         return
     try:
+        await ensure_db_initialized()
+        async with db.acquire() as conn:
+            await conn.execute("DELETE FROM messages WHERE channel_id=$1", str(interaction.channel_id))
         await clear_channel_history(str(interaction.channel_id))
         await send_interaction(interaction, "mrrp~ history cleared 🧹✨", ephemeral=True)
     except Exception as e:
@@ -1229,6 +1530,9 @@ async def relationship_cmd(interaction: discord.Interaction):
         ephemeral=True
     )
 
+    except Exception as e:
+        log_error("ASK CMD", e)
+        await interaction.followup.send(f"{friendly_error_message(e)}\n```{type(e).__name__}: {e}```", ephemeral=True)
 # ================= AI =================
 async def ask_ai(messages: List[dict]) -> str:
     errors = []
@@ -1317,6 +1621,12 @@ async def ask_ai_unique(messages: List[dict], channel_id: str) -> str:
             "content": "Avoid repeating similar messages. Previous bot messages:\n- " + "\n- ".join(previous)
         })
 
+    await ensure_db_initialized()
+    async with db.acquire() as conn:
+        msg_count = await conn.fetchval("SELECT COUNT(*) FROM messages")
+        admin_count = await conn.fetchval("SELECT COUNT(*) FROM admins")
+        fact_count = await conn.fetchval("SELECT COUNT(*) FROM user_facts")
+        bot_hist_count = await conn.fetchval("SELECT COUNT(*) FROM bot_message_history")
     mood = mood_key(channel_id)
     for _ in range(MAX_REPEAT_RETRIES):
         candidate = await ask_ai(messages)
@@ -1489,6 +1799,7 @@ async def auto_talk_loop():
                 await ch.send(msg, allowed_mentions=discord.AllowedMentions.none())
                 await save_bot_message_history(channel_id, msg)
                 remember_bot_talk(channel_id)
+
             except Exception as e:
                 log_error("AUTO TALK GUILD", e)
 
@@ -1589,7 +1900,7 @@ async def on_message(message: discord.Message):
     except Exception as e:
         log_error("ON_MESSAGE", e)
         try:
-            await message.channel.send(f"mrrp~ something broke 🥺\n```{type(e).__name__}: {e}```")
+            await message.channel.send(f"{friendly_error_message(e)}\n```{type(e).__name__}: {e}```")
         except Exception:
             pass
 
@@ -1597,8 +1908,12 @@ async def on_message(message: discord.Message):
 @bot.event
 async def on_ready():
     global bot_owner_id
-    await init_db()
-    await load_admins()
+    try:
+        await init_db()
+        await load_admins()
+    except Exception as e:
+        log_error("READY INIT", e)
+        admins.clear()
 
     app_info = await bot.application_info()
     bot_owner_id = app_info.owner.id if app_info.owner else None
