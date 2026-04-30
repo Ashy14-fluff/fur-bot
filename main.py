@@ -46,7 +46,6 @@ def build_model_candidates() -> List[str]:
     if MODEL_FALLBACKS_RAW.strip():
         candidates.extend(x.strip() for x in MODEL_FALLBACKS_RAW.split(",") if x.strip())
 
-    # Deduplicate while preserving order
     deduped = list(dict.fromkeys(candidates))
     if not deduped:
         deduped = ["llama-3.1-8b-instant"]
@@ -58,8 +57,6 @@ MODEL_CANDIDATES = build_model_candidates()
 # ================= BOT =================
 intents = discord.Intents.default()
 intents.message_content = True
-# Only enable presences if you truly turned it on in the Discord Developer Portal.
-# If not, set this to False.
 intents.presences = ENABLE_PRESENCES
 intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -316,18 +313,6 @@ def mood_from_text(text: str) -> str:
 
     if any(w in low for w in ["sleepy", "tired", "eepy", "zzz", "good night", "night"]):
         return "sleepy"
-
-    if any(w in low for w in ["sad", "lonely", "hurt", "down", "cry", "depressed"]):
-        return "soft"
-
-    if any(w in low for w in ["play", "game", "chaos", "mischief", "tease", "funny"]):
-        return "playful"
-
-    if any(w in low for w in ["happy", "yay", "excited", "hehe", "uwu", "owo", "love"]):
-        return "happy"
-
-    if any(w in low for w in ["sleepy", "tired", "eepy", "zzz", "good night", "night"]):
-        return "sleepy"
     if any(w in low for w in ["sad", "lonely", "hurt", "down", "cry", "depressed"]):
         return "soft"
     if any(w in low for w in ["play", "game", "chaos", "mischief", "tease", "funny"]):
@@ -514,13 +499,10 @@ TOPIC_STOPWORDS = {
     "why", "how", "you", "your", "yuw", "me", "my", "mine", "a", "an", "to", "of", "in", "on",
     "is", "are", "was", "were", "be", "been", "it", "we", "they", "he", "she", "them", "us",
     "about", "from", "but", "not", "can", "could", "would", "should",
-
-    # filler / chat noise
     "ok", "okay", "okie", "yeah", "yep", "nope", "nah", "hmm", "hmmm", "uh", "uhh",
     "hehe", "uwu", "owo", "lol", "lmao", "pls", "plz", "bro", "bruh",
     "hi", "hello", "hey", "yo", "yes", "no", "omg", "idk", "btw",
 }
-
 
 
 def extract_topics(text: str) -> List[str]:
@@ -1145,6 +1127,71 @@ async def mood_cmd(interaction: discord.Interaction):
     mood_text = current_live_mood(channel_id)
     await send_interaction(interaction, f"mrrp~ current mood right now: **{mood_text}**")
 
+# ================= RELATIONSHIP =================
+async def get_relationship_score(user_id: str) -> int:
+    await ensure_db_initialized()
+    try:
+        async with db.acquire() as conn:
+            row = await conn.fetchrow("SELECT score FROM user_relationships WHERE user_id=$1", user_id)
+        if row and row["score"] is not None:
+            return int(row["score"])
+    except Exception as e:
+        log_error("REL LOAD", e)
+    return 0
+
+
+async def set_relationship_score(user_id: str, score: int):
+    await ensure_db_initialized()
+    score = max(RELATIONSHIP_SCORE_MIN, min(RELATIONSHIP_SCORE_MAX, int(score)))
+    try:
+        async with db.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO user_relationships(user_id, score, last_updated)
+                VALUES($1, $2, NOW())
+                ON CONFLICT(user_id)
+                DO UPDATE SET score=$2, last_updated=NOW()
+                """,
+                user_id, score
+            )
+    except Exception as e:
+        log_error("REL SET", e)
+
+
+async def add_relationship_score(user_id: str, delta: int):
+    if not delta:
+        return
+    current = await get_relationship_score(user_id)
+    await set_relationship_score(user_id, current + delta)
+
+
+def relationship_tier(score: int) -> str:
+    if score >= 120:
+        return "bestie"
+    if score >= 60:
+        return "close"
+    if score >= 20:
+        return "warm"
+    if score >= -20:
+        return "neutral"
+    if score >= -60:
+        return "distant"
+    return "cold"
+
+
+def relationship_hint(score: int) -> str:
+    if score >= 120:
+        return "very affectionate and familiar"
+    if score >= 60:
+        return "comfortable and friendly"
+    if score >= 20:
+        return "open and gentle"
+    if score >= -20:
+        return "neutral and polite"
+    if score >= -60:
+        return "careful and reserved"
+    return "keep replies short, soft, and non-pushy"
+
 # ================= AI =================
 async def ask_ai(messages: List[dict]) -> str:
     errors = []
@@ -1233,12 +1280,6 @@ async def ask_ai_unique(messages: List[dict], channel_id: str) -> str:
             "content": "Avoid repeating similar messages. Previous bot messages:\n- " + "\n- ".join(previous)
         })
 
-    await ensure_db_initialized()
-    async with db.acquire() as conn:
-        msg_count = await conn.fetchval("SELECT COUNT(*) FROM messages")
-        admin_count = await conn.fetchval("SELECT COUNT(*) FROM admins")
-        fact_count = await conn.fetchval("SELECT COUNT(*) FROM user_facts")
-        bot_hist_count = await conn.fetchval("SELECT COUNT(*) FROM bot_message_history")
     mood = mood_key(channel_id)
     for _ in range(MAX_REPEAT_RETRIES):
         candidate = await ask_ai(messages)
@@ -1435,12 +1476,10 @@ async def auto_talk_loop():
                 now_dt = bot_local_dt()
                 tod = time_of_day_label(now_dt)
                 topics = topic_summary(channel_id)
-                rel_score = await get_relationship_score(channel_id)
 
                 prompt = [
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "system", "content": f"Current mood: {mood}"},
-                    {"role": "system", "content": f"Relationship score: {rel_score}"},
                     {"role": "system", "content": f"Recent topics: {topics}"},
                     {"role": "system", "content": f"The bot local time is {now_dt.strftime('%H:%M')} ({tod})."},
                     {"role": "user", "content": "Say one short fluffy message to revive chat."}
@@ -1475,12 +1514,10 @@ async def auto_talk_loop():
                 now_dt = bot_local_dt()
                 tod = time_of_day_label(now_dt)
                 topics = topic_summary(channel_id)
-                rel_score = await get_relationship_score(channel_id)
 
                 prompt = [
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "system", "content": f"Current mood: {mood}"},
-                    {"role": "system", "content": f"Relationship score: {rel_score}"},
                     {"role": "system", "content": f"Recent topics: {topics}"},
                     {"role": "system", "content": f"Time: {now_dt.strftime('%H:%M')} ({tod})"},
                     {"role": "user", "content": "Say one short cute message to check on the user."}
