@@ -1093,6 +1093,45 @@ Bot local time: {now_dt.strftime('%H:%M')}
     messages.extend(history)
     return messages
 
+# ================= RELATIONSHIP SIGNALS =================
+def detect_positive_signals(text: str) -> int:
+    low = text.lower()
+    score = 0
+    if any(w in low for w in ["thanks", "thank you", "cute", "good", "love", "nice", "sweet"]):
+        score += 2
+    if any(w in low for w in ["pet", "boop", "hug", "headpat", "cuddle"]):
+        score += 3
+    if any(w in low for w in ["uwu", "owo", ">w<", "hehe"]):
+        score += 1
+    if len(text) > 10:
+        score += 1
+    return score
+
+
+def detect_negative_signals(text: str) -> int:
+    low = text.lower()
+    score = 0
+    if any(w in low for w in ["shut up", "stupid", "hate you", "bad bot"]):
+        score -= 5
+    if any(w in low for w in ["angry", "annoyed", "mad"]):
+        score -= 2
+    return score
+
+
+def detect_relationship_delta(text: str, channel_id: str, user_id: str) -> int:
+    score = 0
+    score += detect_positive_signals(text)
+    score += detect_negative_signals(text)
+    mood = mood_key(channel_id)
+    if mood in {"soft", "happy"}:
+        score += 1
+    topics = list(channel_topics.get(channel_id, []))
+    if topics:
+        low = text.lower()
+        if any(t in low for t in topics[-2:]):
+            score += 1
+    return score
+
 # ================= MEMORY / EMOTION / TOPIC UTIL =================
 async def maybe_summarize_emotion_and_topic(channel_id: str, user_id: str, user_text: str):
     emo = extract_emotional_memory(user_text)
