@@ -2188,9 +2188,6 @@ async def on_message(message: discord.Message):
 
     now = time.monotonic()
     if await is_user_rate_limited(user_id, now):
-    last_user_talk = user_cooldowns.get(user_id, 0.0)
-    if now - last_user_talk < user_message_cooldown_seconds and not await is_admin(user_id):
-    if now - last_user_talk < USER_MESSAGE_COOLDOWN_SECONDS and not await is_admin(user_id):
         return
     user_cooldowns[user_id] = now
 
