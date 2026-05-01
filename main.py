@@ -5,7 +5,7 @@ import asyncio
 import traceback
 import random
 from collections import Counter, defaultdict, deque
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from typing import Optional, Set, Dict, List
 from difflib import SequenceMatcher
@@ -88,6 +88,7 @@ CLEANUP_STALE_CHANNELS_SECONDS = 3600
 STALE_CHANNEL_AGE = 604800
 
 STATUS_UPDATE_SECONDS = 120
+user_message_cooldown_seconds = 6.0
 USER_MESSAGE_COOLDOWN_SECONDS = 6
 
 SIM_THRESHOLD = 0.78
@@ -1019,6 +1020,81 @@ async def admin_status(interaction: discord.Interaction):
     )
 
 
+@admin_group.command(name="help_admin", description="Show available admin commands")
+async def admin_help(interaction: discord.Interaction):
+    if not await require_admin(interaction):
+        return
+    text = (
+        "mrrp~ admin help 🐾\n"
+        "• /admin add_admin <member>\n"
+        "• /admin remove_admin <member>\n"
+        "• /admin list_admins\n"
+        "• /admin admin_status\n"
+        "• /admin set_cooldown <seconds>\n"
+        "• /admin pause_chat / resume_chat\n"
+        "• /admin mood_set <neutral|happy|soft|sleepy|playful>\n"
+        "• /admin mood_reset\n"
+        "• /admin kick_member <member> <confirm:true>\n"
+        "• /admin ban_member <member> <confirm:true>\n"
+        "• /admin clearhistory <confirm:true>"
+    )
+    await send_interaction(interaction, text, ephemeral=True)
+
+
+@admin_group.command(name="set_cooldown", description="Set message cooldown seconds")
+@app_commands.describe(seconds="Cooldown in seconds (0-60)")
+async def admin_set_cooldown(interaction: discord.Interaction, seconds: float):
+    if not await require_admin(interaction):
+        return
+    global user_message_cooldown_seconds
+    user_message_cooldown_seconds = max(0.0, min(60.0, float(seconds)))
+    await send_interaction(interaction, f"mrrp~ cooldown set to **{user_message_cooldown_seconds:.1f}s** 🐾", ephemeral=True)
+
+
+@admin_group.command(name="remove_admin", description="Remove a user from admin")
+@app_commands.describe(member="The member to remove")
+async def admin_remove(interaction: discord.Interaction, member: discord.Member):
+    if not await require_admin(interaction):
+        return
+    await ensure_db_initialized()
+    async with db.acquire() as conn:
+        await conn.execute("DELETE FROM admins WHERE user_id=$1", str(member.id))
+    admins.discard(str(member.id))
+    await send_interaction(interaction, f"mrrp~ removed admin {member.display_name} 🐾", ephemeral=True)
+
+
+
+@admin_group.command(name="add_admin", description="Add a user as admin")
+@app_commands.describe(member="The member to add")
+async def admin_add(interaction: discord.Interaction, member: discord.Member):
+    if not await require_admin(interaction):
+        if not await can_bootstrap_admin(interaction):
+            return
+        await send_interaction(interaction, "mrrp~ first admin bootstrap accepted for server owner 🐾", ephemeral=True)
+    await ensure_db_initialized()
+    async with db.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO admins(user_id) VALUES($1) ON CONFLICT (user_id) DO NOTHING",
+            str(member.id),
+        )
+    admins.add(str(member.id))
+    await send_interaction(interaction, f"mrrp~ {member.display_name} is now admin 🐾", ephemeral=True)
+
+
+@admin_group.command(name="admin_status", description="Show bot status for admins")
+async def admin_status(interaction: discord.Interaction):
+    if not await require_admin(interaction):
+        return
+    db_state = "ready" if db is not None else "not ready"
+    channel_id = str(interaction.channel_id or "0")
+    paused_state = "yes" if channel_id in paused_channels else "no"
+    await send_interaction(
+        interaction,
+        f"mrrp~ status 🐾\nDB: **{db_state}**\nmodels: **{', '.join(MODEL_CANDIDATES)}**\npaused here: **{paused_state}**\nautotalk check: **{AUTO_TALK_CHECK_SECONDS}s**",
+        ephemeral=True,
+    )
+
+
 @admin_group.command(name="remove_admin", description="Remove a user from admin")
 @app_commands.describe(member="The member to remove")
 async def admin_remove(interaction: discord.Interaction, member: discord.Member):
@@ -1320,27 +1396,51 @@ async def admin_autotalk_channel_clear(interaction: discord.Interaction):
     await send_interaction(interaction, "mrrp~ auto-talk channel cleared. set one again with /admin autotalk_channel 🐾", ephemeral=True)
 
 
-@admin_group.command(name="kick", description="Kick a member")
-@app_commands.describe(member="Member to kick", reason="Reason for kick")
-async def admin_kick(interaction: discord.Interaction, member: discord.Member, reason: str = "no reason"):
+@admin_group.command(name="kick_member", description="Kick a member")
+@app_commands.describe(member="Member to kick", reason="Reason for kick", confirm="Must be true to confirm")
+async def admin_kick(interaction: discord.Interaction, member: discord.Member, confirm: bool = False, reason: str = "no reason"):
     if not await require_admin(interaction):
+        return
+    if not confirm:
+        await send_interaction(interaction, "mrrp~ set `confirm` to true to kick this member 🥺", ephemeral=True)
         return
     await member.kick(reason=reason)
     await send_interaction(interaction, f"mrrp~ kicked {member.display_name} 🐾", ephemeral=True)
 
 
-@admin_group.command(name="ban", description="Ban a member")
-@app_commands.describe(member="Member to ban", reason="Reason for ban")
-async def admin_ban(interaction: discord.Interaction, member: discord.Member, reason: str = "no reason"):
+@admin_group.command(name="ban_member", description="Ban a member")
+@app_commands.describe(member="Member to ban", reason="Reason for ban", confirm="Must be true to confirm")
+async def admin_ban(interaction: discord.Interaction, member: discord.Member, confirm: bool = False, reason: str = "no reason"):
     if not await require_admin(interaction):
+        return
+    if not confirm:
+        await send_interaction(interaction, "mrrp~ set `confirm` to true to ban this member 🥺", ephemeral=True)
         return
     await member.ban(reason=reason)
     await send_interaction(interaction, f"mrrp~ banned {member.display_name} 💢", ephemeral=True)
 
 
-@admin_group.command(name="clearhistory", description="Clear this channel's history")
-async def admin_clearhistory(interaction: discord.Interaction):
+@admin_group.command(name="mute_member", description="Timeout (mute) a member")
+@app_commands.describe(member="Member to mute", minutes="Timeout length in minutes (1-10080)", reason="Reason for mute", confirm="Must be true to confirm")
+async def admin_mute(interaction: discord.Interaction, member: discord.Member, minutes: int = 10, confirm: bool = False, reason: str = "no reason"):
     if not await require_admin(interaction):
+        return
+    if not confirm:
+        await send_interaction(interaction, "mrrp~ set `confirm` to true to mute this member 🥺", ephemeral=True)
+        return
+    minutes = max(1, min(10080, int(minutes)))
+    until = discord.utils.utcnow() + timedelta(minutes=minutes)
+    await member.timeout(until, reason=reason)
+    await send_interaction(interaction, f"mrrp~ muted {member.display_name} for **{minutes}** minute(s) 💤", ephemeral=True)
+
+
+@admin_group.command(name="clearhistory", description="Clear this channel's history")
+@app_commands.describe(confirm="Must be true to confirm")
+async def admin_clearhistory(interaction: discord.Interaction, confirm: bool = False):
+    if not await require_admin(interaction):
+        return
+    if not confirm:
+        await send_interaction(interaction, "mrrp~ set `confirm` to true to clear history here 🥺", ephemeral=True)
         return
     try:
         await clear_channel_history(str(interaction.channel_id))
@@ -1363,6 +1463,14 @@ async def admin_mood_set(interaction: discord.Interaction, mood: str):
     channel_mood[channel_id] = mood_value
     await send_interaction(interaction, f"mrrp~ mood set to **{mood_value}** here 🐾", ephemeral=True)
 
+
+@admin_group.command(name="mood_reset", description="Reset mood to neutral for this channel")
+async def admin_mood_reset(interaction: discord.Interaction):
+    if not await require_admin(interaction):
+        return
+    channel_id = str(interaction.channel_id or interaction.user.id)
+    channel_mood[channel_id] = "neutral"
+    await send_interaction(interaction, "mrrp~ mood reset to **neutral** here 🐾", ephemeral=True)
 @admin_group.command(name="mood_set", description="Set the bot mood for this channel")
 @app_commands.describe(mood="Choose: neutral, happy, soft, sleepy, playful")
 async def admin_mood_set(interaction: discord.Interaction, mood: str):
@@ -1395,6 +1503,15 @@ async def admin_mood_set(interaction: discord.Interaction, mood: str):
     channel_id = str(interaction.channel_id or interaction.user.id)
     channel_mood[channel_id] = mood_value
     await send_interaction(interaction, f"mrrp~ mood set to **{mood_value}** here 🐾", ephemeral=True)
+
+@admin_group.command(name="pause_chat", description="Pause bot replies in this channel")
+async def admin_pause_chat(interaction: discord.Interaction):
+    if not await require_admin(interaction):
+        return
+    channel_id = str(interaction.channel_id or interaction.user.id)
+    paused_channels.add(channel_id)
+    await send_interaction(interaction, "mrrp~ chat paused in this channel 💤", ephemeral=True)
+
 
 @admin_group.command(name="mood_reset", description="Reset mood to neutral for this channel")
 async def admin_mood_reset(interaction: discord.Interaction):
@@ -1905,6 +2022,7 @@ async def on_message(message: discord.Message):
 
     now = time.monotonic()
     last_user_talk = user_cooldowns.get(user_id, 0.0)
+    if now - last_user_talk < user_message_cooldown_seconds and not await is_admin(user_id):
     if now - last_user_talk < USER_MESSAGE_COOLDOWN_SECONDS and not await is_admin(user_id):
         return
     user_cooldowns[user_id] = now
