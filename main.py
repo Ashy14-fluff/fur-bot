@@ -131,8 +131,16 @@ You are a living fluffy companion 🐾
 """
 
 # ================= SLASH GROUPS =================
-admin_group = app_commands.Group(name="admin", description="Admin commands")
-memory_group = app_commands.Group(name="memory", description="Memory commands")
+class SafeGroup(app_commands.Group):
+    def add_command(self, command, /, *, override: bool = False):
+        existing = self.get_command(command.name)
+        if existing is not None:
+            self.remove_command(command.name)
+        return super().add_command(command, override=override)
+
+
+admin_group = SafeGroup(name="admin", description="Admin commands")
+memory_group = SafeGroup(name="memory", description="Memory commands")
 bot.tree.add_command(admin_group)
 bot.tree.add_command(memory_group)
 
@@ -997,6 +1005,48 @@ async def admin_add(interaction: discord.Interaction, member: discord.Member):
     await send_interaction(interaction, f"mrrp~ {member.display_name} is now admin 🐾", ephemeral=True)
 
 
+@admin_group.command(name="admin_status", description="Show bot status for admins")
+async def admin_status(interaction: discord.Interaction):
+    if not await require_admin(interaction):
+        return
+    db_state = "ready" if db is not None else "not ready"
+    channel_id = str(interaction.channel_id or "0")
+    paused_state = "yes" if channel_id in paused_channels else "no"
+    await send_interaction(
+        interaction,
+        f"mrrp~ status 🐾\nDB: **{db_state}**\nmodels: **{', '.join(MODEL_CANDIDATES)}**\npaused here: **{paused_state}**\nautotalk check: **{AUTO_TALK_CHECK_SECONDS}s**",
+        ephemeral=True,
+    )
+
+
+@admin_group.command(name="remove_admin", description="Remove a user from admin")
+@app_commands.describe(member="The member to remove")
+async def admin_remove(interaction: discord.Interaction, member: discord.Member):
+    if not await require_admin(interaction):
+        return
+    await ensure_db_initialized()
+    async with db.acquire() as conn:
+        await conn.execute("DELETE FROM admins WHERE user_id=$1", str(member.id))
+    admins.discard(str(member.id))
+    await send_interaction(interaction, f"mrrp~ removed admin {member.display_name} 🐾", ephemeral=True)
+
+@admin_group.command(name="add_admin", description="Add a user as admin")
+@app_commands.describe(member="The member to add")
+async def admin_add(interaction: discord.Interaction, member: discord.Member):
+    if not await require_admin(interaction):
+        if not await can_bootstrap_admin(interaction):
+            return
+        await send_interaction(interaction, "mrrp~ first admin bootstrap accepted for server owner 🐾", ephemeral=True)
+    await ensure_db_initialized()
+    async with db.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO admins(user_id) VALUES($1) ON CONFLICT (user_id) DO NOTHING",
+            str(member.id),
+        )
+    admins.add(str(member.id))
+    await send_interaction(interaction, f"mrrp~ {member.display_name} is now admin 🐾", ephemeral=True)
+
+
 @admin_group.command(name="add_admin", description="Add a user as admin")
 @app_commands.describe(member="The member to add")
 async def admin_add(interaction: discord.Interaction, member: discord.Member):
@@ -1062,6 +1112,14 @@ async def admin_status(interaction: discord.Interaction):
         ephemeral=True,
     )
 
+@admin_group.command(name="list_admins", description="List admins")
+async def admin_list(interaction: discord.Interaction):
+    if not await require_admin(interaction):
+        return
+    if not admins:
+        await send_interaction(interaction, "mrrp~ no admins yet 🐾", ephemeral=True)
+        return
+    await send_interaction(interaction, "mrrp~ admins:\n" + "\n".join(f"<@{a}>" for a in sorted(admins)), ephemeral=True)
 @admin_group.command(name="add", description="Add a user as admin")
 @app_commands.describe(member="The member to add")
 async def admin_add(interaction: discord.Interaction, member: discord.Member):
@@ -1305,6 +1363,26 @@ async def admin_mood_set(interaction: discord.Interaction, mood: str):
     channel_mood[channel_id] = mood_value
     await send_interaction(interaction, f"mrrp~ mood set to **{mood_value}** here 🐾", ephemeral=True)
 
+@admin_group.command(name="mood_set", description="Set the bot mood for this channel")
+@app_commands.describe(mood="Choose: neutral, happy, soft, sleepy, playful")
+async def admin_mood_set(interaction: discord.Interaction, mood: str):
+    if not await require_admin(interaction):
+        return
+    mood_value = mood.strip().lower()
+    if mood_value not in {"neutral", "happy", "soft", "sleepy", "playful"}:
+        await send_interaction(interaction, "mrrp~ mood must be one of: neutral, happy, soft, sleepy, playful 🐾", ephemeral=True)
+        return
+    channel_id = str(interaction.channel_id or interaction.user.id)
+    channel_mood[channel_id] = mood_value
+    await send_interaction(interaction, f"mrrp~ mood set to **{mood_value}** here 🐾", ephemeral=True)
+
+@admin_group.command(name="mood_reset", description="Reset mood to neutral for this channel")
+async def admin_mood_reset(interaction: discord.Interaction):
+    if not await require_admin(interaction):
+        return
+    channel_id = str(interaction.channel_id or interaction.user.id)
+    channel_mood[channel_id] = "neutral"
+    await send_interaction(interaction, "mrrp~ mood reset to **neutral** here 🐾", ephemeral=True)
 @admin_group.command(name="mood_set", description="Set the bot mood for this channel")
 @app_commands.describe(mood="Choose: neutral, happy, soft, sleepy, playful")
 async def admin_mood_set(interaction: discord.Interaction, mood: str):
