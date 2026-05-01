@@ -45,11 +45,15 @@ def build_model_candidates() -> List[str]:
     candidates = [MODEL] if MODEL and MODEL.strip() else []
     if MODEL_FALLBACKS_RAW.strip():
         candidates.extend(x.strip() for x in MODEL_FALLBACKS_RAW.split(",") if x.strip())
+<<<<<<< HEAD
+    return list(dict.fromkeys(candidates))
+=======
 
     deduped = list(dict.fromkeys(candidates))
     if not deduped:
         deduped = ["llama-3.1-8b-instant"]
     return deduped
+>>>>>>> 3b62b5668113f2bef1dbabbc06e52dd6e5667254
 
 
 MODEL_CANDIDATES = build_model_candidates()
@@ -57,8 +61,12 @@ MODEL_CANDIDATES = build_model_candidates()
 # ================= BOT =================
 intents = discord.Intents.default()
 intents.message_content = True
+<<<<<<< HEAD
+intents.presences = True  # only if enabled in Dev Portal
+=======
 intents.presences = ENABLE_PRESENCES
 intents.members = True
+>>>>>>> 3b62b5668113f2bef1dbabbc06e52dd6e5667254
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 db: Optional[asyncpg.Pool] = None
@@ -80,10 +88,17 @@ paused_channels: Set[str] = set()
 user_cooldowns: Dict[str, float] = {}
 
 AUTO_TALK_CHECK_SECONDS = 60
+<<<<<<< HEAD
+AUTO_TALK_IDLE_REQUIRED = 18000   # 5 hours
+AUTO_TALK_RANDOM_MIN = 18000      # 5 hours
+AUTO_TALK_RANDOM_MAX = 28800      # 8 hours
+AUTO_TALK_INITIAL_JITTER = 300
+=======
 AUTO_TALK_IDLE_REQUIRED = 18000
 AUTO_TALK_RANDOM_MIN = 18000
 AUTO_TALK_RANDOM_MAX = 28800
 AUTO_TALK_INITIAL_JITTER = 300
+>>>>>>> 3b62b5668113f2bef1dbabbc06e52dd6e5667254
 CLEANUP_STALE_CHANNELS_SECONDS = 3600
 STALE_CHANNEL_AGE = 604800
 
@@ -340,6 +355,10 @@ def mood_from_text(text: str) -> str:
 def time_aware_mood(channel_id: str) -> str:
     explicit = channel_mood.get(channel_id, "neutral")
     idle = time.monotonic() - channel_last_activity.get(channel_id, time.monotonic())
+<<<<<<< HEAD
+
+=======
+>>>>>>> 3b62b5668113f2bef1dbabbc06e52dd6e5667254
     if idle > 7200 and explicit == "neutral":
         return "sleepy"
     return explicit
@@ -400,6 +419,8 @@ def fluff_wrap(reply: str, mood: str) -> str:
 
 
 def fluffy_english_filter(text: str) -> str:
+<<<<<<< HEAD
+    # longer / more specific patterns FIRST
     replacements = [
         (r"\bgood morning\b", "gud mornin~ ☀️"),
         (r"\bgood night\b", "gud night~ 🌙"),
@@ -418,6 +439,27 @@ def fluffy_english_filter(text: str) -> str:
         (r"\bthanks\b", "thanksies~ 💖"),
         (r"\bsorry\b", "sowwy 🥺"),
     ]
+
+=======
+    replacements = [
+        (r"\bgood morning\b", "gud mornin~ ☀️"),
+        (r"\bgood night\b", "gud night~ 🌙"),
+        (r"\bgood afternoon\b", "gud afternoon~"),
+        (r"\bgood evening\b", "gud evenin~"),
+        (r"\bwhat are you doing\b", "whatchu doin~?"),
+        (r"\bthank you\b", "thank chu~ 💕"),
+        (r"\bare you\b", "yuw"),
+        (r"\bi am\b", "me is"),
+        (r"\bi'm\b", "me's"),
+        (r"\bhello\b", "hewwo"),
+        (r"\bhi\b", "haii"),
+        (r"\bhey\b", "heyy"),
+        (r"\byou\b", "yuw"),
+        (r"\bi\b", "me"),
+        (r"\bthanks\b", "thanksies~ 💖"),
+        (r"\bsorry\b", "sowwy 🥺"),
+    ]
+>>>>>>> 3b62b5668113f2bef1dbabbc06e52dd6e5667254
     out = text
     for pattern, repl in replacements:
         out = re.sub(pattern, repl, out, flags=re.IGNORECASE)
@@ -448,12 +490,29 @@ async def is_bot_reply(message: discord.Message) -> bool:
     ref = message.reference
     if not ref:
         return False
+<<<<<<< HEAD
+=======
     if ref.resolved is not None:
         resolved = ref.resolved
         author = getattr(resolved, "author", None)
         return bool(author and bot.user and author.id == bot.user.id)
     if not ref.message_id:
         return False
+    try:
+        fetched = await message.channel.fetch_message(ref.message_id)
+        return bool(bot.user and fetched.author.id == bot.user.id)
+    except Exception:
+        return False
+>>>>>>> 3b62b5668113f2bef1dbabbc06e52dd6e5667254
+
+    if ref.resolved is not None:
+        resolved = ref.resolved
+        author = getattr(resolved, "author", None)
+        return bool(author and bot.user and author.id == bot.user.id)
+
+    if not ref.message_id:
+        return False
+
     try:
         fetched = await message.channel.fetch_message(ref.message_id)
         return bool(bot.user and fetched.author.id == bot.user.id)
@@ -736,7 +795,12 @@ async def save_fact_if_new(user_id: str, fact: str):
 
 
 def extract_fact(text: str) -> Optional[str]:
+<<<<<<< HEAD
     text = text.strip()
+
+=======
+    text = text.strip()
+>>>>>>> 3b62b5668113f2bef1dbabbc06e52dd6e5667254
     patterns = [
         (r"\bmy name is\s+(.+)$", "name"),
         (r"\bcall me\s+(.+)$", "name"),
@@ -750,11 +814,22 @@ def extract_fact(text: str) -> Optional[str]:
             value = m.group(1).strip(" .!?")
             if value:
                 return f"{label}: {value}"
+<<<<<<< HEAD
+
+    # only store "I am" / "I'm" if it seems more permanent
     m = re.search(r"\bi (?:am|\'m)\s+(.+)$", text, re.IGNORECASE)
     if m:
         value = m.group(1).strip(" .!?")
         if not any(w in value.lower() for w in ["hungry", "tired", "sleepy", "bored"]):
             return f"is: {value}"
+
+=======
+    m = re.search(r"\bi (?:am|\'m)\s+(.+)$", text, re.IGNORECASE)
+    if m:
+        value = m.group(1).strip(" .!?")
+        if not any(w in value.lower() for w in ["hungry", "tired", "sleepy", "bored"]):
+            return f"is: {value}"
+>>>>>>> 3b62b5668113f2bef1dbabbc06e52dd6e5667254
     return None
 
 
@@ -1728,6 +1803,10 @@ async def admin_pause_chat(interaction: discord.Interaction):
     paused_channels.add(channel_id)
     await send_interaction(interaction, "mrrp~ chat paused in this channel 💤", ephemeral=True)
 
+<<<<<<< HEAD
+    await interaction.response.defer(thinking=True)
+=======
+>>>>>>> 3b62b5668113f2bef1dbabbc06e52dd6e5667254
 
 @admin_group.command(name="resume_chat", description="Resume bot replies in this channel")
 async def admin_resume_chat(interaction: discord.Interaction):
@@ -2204,8 +2283,12 @@ async def on_message(message: discord.Message):
 
     is_dm = isinstance(message.channel, discord.DMChannel)
     is_mention = bot.user is not None and bot.user.mentioned_in(message)
+<<<<<<< HEAD
+    reply_to_bot = await is_bot_reply(message)
+=======
     reply_to_bot = await is_bot_reply(message)
     admin_bypass = await is_admin(user_id)
+>>>>>>> 3b62b5668113f2bef1dbabbc06e52dd6e5667254
 
     if not (is_dm or is_mention or reply_to_bot or admin_bypass):
         await remember_topics(channel_id, message.content)
@@ -2290,5 +2373,10 @@ async def on_ready():
 
     print(f"🐾 Bot ready as {bot.user} | admins: {len(admins)}")
 
+<<<<<<< HEAD
+=======
+
+bot.run(DISCORD_TOKEN)
+>>>>>>> 3b62b5668113f2bef1dbabbc06e52dd6e5667254
 
 bot.run(DISCORD_TOKEN)
