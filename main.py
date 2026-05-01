@@ -75,6 +75,9 @@ channel_last_bot_talk: Dict[str, float] = {}
 channel_mood: Dict[str, str] = {}
 channel_next_auto_talk: Dict[str, float] = {}
 channel_topics: Dict[str, deque] = defaultdict(lambda: deque(maxlen=3))
+busy_channels: Set[str] = set()
+paused_channels: Set[str] = set()
+user_cooldowns: Dict[str, float] = {}
 
 AUTO_TALK_CHECK_SECONDS = 60
 AUTO_TALK_IDLE_REQUIRED = 18000
@@ -85,6 +88,7 @@ CLEANUP_STALE_CHANNELS_SECONDS = 3600
 STALE_CHANNEL_AGE = 604800
 
 STATUS_UPDATE_SECONDS = 120
+USER_MESSAGE_COOLDOWN_SECONDS = 6
 
 SIM_THRESHOLD = 0.78
 MAX_REPEAT_RETRIES = 5
@@ -926,6 +930,14 @@ async def require_admin(interaction: discord.Interaction) -> bool:
     await send_interaction(interaction, "mrrp~ no permission 🥺", ephemeral=True)
     return False
 
+
+async def can_bootstrap_admin(interaction: discord.Interaction) -> bool:
+    if not interaction.guild:
+        return False
+    if admins:
+        return False
+    return interaction.guild.owner_id == interaction.user.id
+
 # ================= MEMORY / ADMIN COMMANDS =================
 @memory_group.command(name="remember", description="Store a fact about you")
 @app_commands.describe(fact="Something Fur Bot should remember")
@@ -972,6 +984,40 @@ async def memory_forgetme(interaction: discord.Interaction):
 @app_commands.describe(member="The member to add")
 async def admin_add(interaction: discord.Interaction, member: discord.Member):
     if not await require_admin(interaction):
+        if not await can_bootstrap_admin(interaction):
+            return
+        await send_interaction(interaction, "mrrp~ first admin bootstrap accepted for server owner 🐾", ephemeral=True)
+    await ensure_db_initialized()
+    async with db.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO admins(user_id) VALUES($1) ON CONFLICT (user_id) DO NOTHING",
+            str(member.id),
+        )
+    admins.add(str(member.id))
+    await send_interaction(interaction, f"mrrp~ {member.display_name} is now admin 🐾", ephemeral=True)
+
+
+@admin_group.command(name="status", description="Show bot status for admins")
+async def admin_status(interaction: discord.Interaction):
+    if not await require_admin(interaction):
+        return
+    db_state = "ready" if db is not None else "not ready"
+    channel_id = str(interaction.channel_id or "0")
+    paused_state = "yes" if channel_id in paused_channels else "no"
+    await send_interaction(
+        interaction,
+        f"mrrp~ status 🐾\nDB: **{db_state}**\nmodels: **{', '.join(MODEL_CANDIDATES)}**\npaused here: **{paused_state}**\nautotalk check: **{AUTO_TALK_CHECK_SECONDS}s**",
+        ephemeral=True,
+    )
+
+
+@admin_group.command(name="remove", description="Remove a user from admin")
+@app_commands.describe(member="The member to remove")
+async def admin_remove(interaction: discord.Interaction, member: discord.Member):
+    if not await require_admin(interaction):
+        return
+    await ensure_db_initialized()
+    async with db.acquire() as conn:
         return
     await ensure_db_initialized()
     async with db.acquire() as conn:
@@ -1102,6 +1148,47 @@ async def admin_clearhistory(interaction: discord.Interaction):
     except Exception as e:
         log_error("CLEAR HISTORY", e)
         await send_interaction(interaction, "mrrp~ could not clear history 🥺", ephemeral=True)
+
+
+@admin_group.command(name="mood_set", description="Set the bot mood for this channel")
+@app_commands.describe(mood="Choose: neutral, happy, soft, sleepy, playful")
+async def admin_mood_set(interaction: discord.Interaction, mood: str):
+    if not await require_admin(interaction):
+        return
+    mood_value = mood.strip().lower()
+    if mood_value not in {"neutral", "happy", "soft", "sleepy", "playful"}:
+        await send_interaction(interaction, "mrrp~ mood must be one of: neutral, happy, soft, sleepy, playful 🐾", ephemeral=True)
+        return
+    channel_id = str(interaction.channel_id or interaction.user.id)
+    channel_mood[channel_id] = mood_value
+    await send_interaction(interaction, f"mrrp~ mood set to **{mood_value}** here 🐾", ephemeral=True)
+
+
+@admin_group.command(name="mood_reset", description="Reset mood to neutral for this channel")
+async def admin_mood_reset(interaction: discord.Interaction):
+    if not await require_admin(interaction):
+        return
+    channel_id = str(interaction.channel_id or interaction.user.id)
+    channel_mood[channel_id] = "neutral"
+    await send_interaction(interaction, "mrrp~ mood reset to **neutral** here 🐾", ephemeral=True)
+
+
+@admin_group.command(name="pause_chat", description="Pause bot replies in this channel")
+async def admin_pause_chat(interaction: discord.Interaction):
+    if not await require_admin(interaction):
+        return
+    channel_id = str(interaction.channel_id or interaction.user.id)
+    paused_channels.add(channel_id)
+    await send_interaction(interaction, "mrrp~ chat paused in this channel 💤", ephemeral=True)
+
+
+@admin_group.command(name="resume_chat", description="Resume bot replies in this channel")
+async def admin_resume_chat(interaction: discord.Interaction):
+    if not await require_admin(interaction):
+        return
+    channel_id = str(interaction.channel_id or interaction.user.id)
+    paused_channels.discard(channel_id)
+    await send_interaction(interaction, "mrrp~ chat resumed in this channel 🐾✨", ephemeral=True)
 
 
 @bot.tree.command(name="topic", description="Show the channel's current tracked topic")
@@ -1546,6 +1633,18 @@ async def on_message(message: discord.Message):
     user_id = str(message.author.id)
     username = message.author.display_name
 
+    if channel_id in busy_channels and not await is_admin(user_id):
+        return
+
+    if channel_id in paused_channels and not await is_admin(user_id):
+        return
+
+    now = time.monotonic()
+    last_user_talk = user_cooldowns.get(user_id, 0.0)
+    if now - last_user_talk < USER_MESSAGE_COOLDOWN_SECONDS and not await is_admin(user_id):
+        return
+    user_cooldowns[user_id] = now
+
     touch_channel(channel_id)
 
     detected_mood = mood_from_text(message.content)
@@ -1568,6 +1667,7 @@ async def on_message(message: discord.Message):
         return
 
     try:
+        busy_channels.add(channel_id)
         await save_message(channel_id, user_id, "user", user_text)
         await remember_topics(channel_id, user_text)
         await maybe_summarize_emotion_and_topic(channel_id, user_id, user_text)
@@ -1594,6 +1694,8 @@ async def on_message(message: discord.Message):
             await message.channel.send(f"{friendly_error_message(e)}\n```{type(e).__name__}: {e}```")
         except Exception:
             pass
+    finally:
+        busy_channels.discard(channel_id)
 
 # ================= READY =================
 @bot.event
