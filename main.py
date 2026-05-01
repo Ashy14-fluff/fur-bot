@@ -300,6 +300,17 @@ def touch_channel(channel_id: str):
     channel_last_activity[channel_id] = time.monotonic()
 
 
+def channel_pause_keys(channel: discord.abc.Messageable) -> Set[str]:
+    keys: Set[str] = set()
+    channel_id = getattr(channel, "id", None)
+    if channel_id is not None:
+        keys.add(str(channel_id))
+    parent_id = getattr(channel, "parent_id", None)
+    if parent_id is not None:
+        keys.add(str(parent_id))
+    return keys
+
+
 def remember_bot_talk(channel_id: str):
     now = time.monotonic()
     channel_last_bot_talk[channel_id] = now
@@ -1649,8 +1660,10 @@ async def admin_mood_set(interaction: discord.Interaction, mood: str):
 async def admin_pause_chat(interaction: discord.Interaction):
     if not await require_admin(interaction):
         return
-    channel_id = str(interaction.channel_id or interaction.user.id)
-    paused_channels.add(channel_id)
+    if interaction.channel is not None:
+        paused_channels.update(channel_pause_keys(interaction.channel))
+    else:
+        paused_channels.add(str(interaction.channel_id or interaction.user.id))
     await send_interaction(interaction, "mrrp~ chat paused in this channel 💤", ephemeral=True)
 
 
@@ -1738,8 +1751,11 @@ async def admin_pause_chat(interaction: discord.Interaction):
 async def admin_resume_chat(interaction: discord.Interaction):
     if not await require_admin(interaction):
         return
-    channel_id = str(interaction.channel_id or interaction.user.id)
-    paused_channels.discard(channel_id)
+    if interaction.channel is not None:
+        for key in channel_pause_keys(interaction.channel):
+            paused_channels.discard(key)
+    else:
+        paused_channels.discard(str(interaction.channel_id or interaction.user.id))
     await send_interaction(interaction, "mrrp~ chat resumed in this channel 🐾✨", ephemeral=True)
 
 
@@ -2188,7 +2204,8 @@ async def on_message(message: discord.Message):
     if channel_id in busy_channels and not await is_admin(user_id):
         return
 
-    if channel_id in paused_channels and not await is_admin(user_id):
+    pause_keys = channel_pause_keys(message.channel)
+    if pause_keys and paused_channels.intersection(pause_keys):
         return
 
     now = time.monotonic()
