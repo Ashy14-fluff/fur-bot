@@ -1011,6 +1011,48 @@ async def admin_status(interaction: discord.Interaction):
     )
 
 
+@admin_group.command(name="remove_admin", description="Remove a user from admin")
+@app_commands.describe(member="The member to remove")
+async def admin_remove(interaction: discord.Interaction, member: discord.Member):
+    if not await require_admin(interaction):
+        return
+    await ensure_db_initialized()
+    async with db.acquire() as conn:
+        await conn.execute("DELETE FROM admins WHERE user_id=$1", str(member.id))
+    admins.discard(str(member.id))
+    await send_interaction(interaction, f"mrrp~ removed admin {member.display_name} 🐾", ephemeral=True)
+
+@admin_group.command(name="add", description="Add a user as admin")
+@app_commands.describe(member="The member to add")
+async def admin_add(interaction: discord.Interaction, member: discord.Member):
+    if not await require_admin(interaction):
+        if not await can_bootstrap_admin(interaction):
+            return
+        await send_interaction(interaction, "mrrp~ first admin bootstrap accepted for server owner 🐾", ephemeral=True)
+    await ensure_db_initialized()
+    async with db.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO admins(user_id) VALUES($1) ON CONFLICT (user_id) DO NOTHING",
+            str(member.id),
+        )
+    admins.add(str(member.id))
+    await send_interaction(interaction, f"mrrp~ {member.display_name} is now admin 🐾", ephemeral=True)
+
+
+@admin_group.command(name="status", description="Show bot status for admins")
+async def admin_status(interaction: discord.Interaction):
+    if not await require_admin(interaction):
+        return
+    db_state = "ready" if db is not None else "not ready"
+    channel_id = str(interaction.channel_id or "0")
+    paused_state = "yes" if channel_id in paused_channels else "no"
+    await send_interaction(
+        interaction,
+        f"mrrp~ status 🐾\nDB: **{db_state}**\nmodels: **{', '.join(MODEL_CANDIDATES)}**\npaused here: **{paused_state}**\nautotalk check: **{AUTO_TALK_CHECK_SECONDS}s**",
+        ephemeral=True,
+    )
+
+
 @admin_group.command(name="remove", description="Remove a user from admin")
 @app_commands.describe(member="The member to remove")
 async def admin_remove(interaction: discord.Interaction, member: discord.Member):
