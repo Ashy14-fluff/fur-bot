@@ -1557,8 +1557,9 @@ async def on_message(message: discord.Message):
     is_dm = isinstance(message.channel, discord.DMChannel)
     is_mention = bot.user is not None and bot.user.mentioned_in(message)
     reply_to_bot = await is_bot_reply(message)
+    admin_bypass = await is_admin(user_id)
 
-    if not (is_dm or is_mention or reply_to_bot):
+    if not (is_dm or is_mention or reply_to_bot or admin_bypass):
         await remember_topics(channel_id, message.content)
         return
 
