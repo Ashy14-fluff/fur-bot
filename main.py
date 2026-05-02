@@ -1424,6 +1424,18 @@ async def admin_pause_chat(interaction: discord.Interaction):
     await send_interaction(interaction, "mrrp~ chat paused in this channel 💤", ephemeral=True)
 
 
+@admin_group.command(name="resume_chat", description="Resume bot replies in this channel")
+async def admin_resume_chat(interaction: discord.Interaction):
+    if not await require_admin(interaction):
+        return
+    if interaction.channel is not None:
+        for key in channel_pause_keys(interaction.channel):
+            paused_channels.discard(key)
+    else:
+        paused_channels.discard(str(interaction.channel_id or interaction.user.id))
+    await send_interaction(interaction, "mrrp~ chat resumed in this channel 🐾✨", ephemeral=True)
+
+
 @bot.tree.command(name="topic", description="Show the channel's current tracked topic")
 async def topic_cmd(interaction: discord.Interaction):
     channel_id = str(interaction.channel_id or interaction.user.id)
