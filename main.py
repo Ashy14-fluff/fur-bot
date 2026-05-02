@@ -1073,51 +1073,6 @@ async def admin_add(interaction: discord.Interaction, member: discord.Member):
     await send_interaction(interaction, f"mrrp~ {member.display_name} is now admin 🐾", ephemeral=True)
 
 
-@admin_group.command(name="admin_status", description="Show bot status for admins")
-async def admin_status(interaction: discord.Interaction):
-    if not await require_admin(interaction):
-        return
-    db_state = "ready" if db is not None else "not ready"
-    channel_id = str(interaction.channel_id or "0")
-    paused_state = "yes" if channel_id in paused_channels else "no"
-    await send_interaction(
-        interaction,
-        f"mrrp~ status 🐾\nDB: **{db_state}**\nmodels: **{', '.join(MODEL_CANDIDATES)}**\npaused here: **{paused_state}**\nautotalk check: **{AUTO_TALK_CHECK_SECONDS}s**",
-        ephemeral=True,
-    )
-
-
-@admin_group.command(name="help_admin", description="Show available admin commands")
-async def admin_help(interaction: discord.Interaction):
-    if not await require_admin(interaction):
-        return
-    text = (
-        "mrrp~ admin help 🐾\n"
-        "• /admin add_admin <member>\n"
-        "• /admin remove_admin <member>\n"
-        "• /admin list_admins\n"
-        "• /admin admin_status\n"
-        "• /admin set_cooldown <seconds>\n"
-        "• /admin pause_chat / resume_chat\n"
-        "• /admin mood_set <neutral|happy|soft|sleepy|playful>\n"
-        "• /admin mood_reset\n"
-        "• /admin kick_member <member> <confirm:true>\n"
-        "• /admin ban_member <member> <confirm:true>\n"
-        "• /admin clearhistory <confirm:true>"
-    )
-    await send_interaction(interaction, text, ephemeral=True)
-
-
-@admin_group.command(name="set_cooldown", description="Set message cooldown seconds")
-@app_commands.describe(seconds="Cooldown in seconds (0-60)")
-async def admin_set_cooldown(interaction: discord.Interaction, seconds: float):
-    if not await require_admin(interaction):
-        return
-    global user_message_cooldown_seconds
-    user_message_cooldown_seconds = max(0.0, min(60.0, float(seconds)))
-    await send_interaction(interaction, f"mrrp~ cooldown set to **{user_message_cooldown_seconds:.1f}s** 🐾", ephemeral=True)
-
-
 @admin_group.command(name="remove_admin", description="Remove a user from admin")
 @app_commands.describe(member="The member to remove")
 async def admin_remove(interaction: discord.Interaction, member: discord.Member):
@@ -1129,21 +1084,15 @@ async def admin_remove(interaction: discord.Interaction, member: discord.Member)
     admins.discard(str(member.id))
     await send_interaction(interaction, f"mrrp~ removed admin {member.display_name} 🐾", ephemeral=True)
 
-@admin_group.command(name="add_admin", description="Add a user as admin")
-@app_commands.describe(member="The member to add")
-async def admin_add(interaction: discord.Interaction, member: discord.Member):
+
+@admin_group.command(name="list_admins", description="List admins")
+async def admin_list(interaction: discord.Interaction):
     if not await require_admin(interaction):
-        if not await can_bootstrap_admin(interaction):
-            return
-        await send_interaction(interaction, "mrrp~ first admin bootstrap accepted for server owner 🐾", ephemeral=True)
-    await ensure_db_initialized()
-    async with db.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO admins(user_id) VALUES($1) ON CONFLICT (user_id) DO NOTHING",
-            str(member.id),
-        )
-    admins.add(str(member.id))
-    await send_interaction(interaction, f"mrrp~ {member.display_name} is now admin 🐾", ephemeral=True)
+        return
+    if not admins:
+        await send_interaction(interaction, "mrrp~ no admins yet 🐾", ephemeral=True)
+        return
+    await send_interaction(interaction, "mrrp~ admins:\n" + "\n".join(f"<@{a}>" for a in sorted(admins)), ephemeral=True)
 
 
 @admin_group.command(name="admin_status", description="Show bot status for admins")
@@ -1189,293 +1138,6 @@ async def admin_set_cooldown(interaction: discord.Interaction, seconds: float):
     global user_message_cooldown_seconds
     user_message_cooldown_seconds = max(0.0, min(60.0, float(seconds)))
     await send_interaction(interaction, f"mrrp~ cooldown set to **{user_message_cooldown_seconds:.1f}s** 🐾", ephemeral=True)
-
-
-@admin_group.command(name="remove_admin", description="Remove a user from admin")
-@app_commands.describe(member="The member to remove")
-async def admin_remove(interaction: discord.Interaction, member: discord.Member):
-    if not await require_admin(interaction):
-        return
-    await ensure_db_initialized()
-    async with db.acquire() as conn:
-        await conn.execute("DELETE FROM admins WHERE user_id=$1", str(member.id))
-    admins.discard(str(member.id))
-    await send_interaction(interaction, f"mrrp~ removed admin {member.display_name} 🐾", ephemeral=True)
-
-
-
-@admin_group.command(name="add_admin", description="Add a user as admin")
-@app_commands.describe(member="The member to add")
-async def admin_add(interaction: discord.Interaction, member: discord.Member):
-    if not await require_admin(interaction):
-        if not await can_bootstrap_admin(interaction):
-            return
-        await send_interaction(interaction, "mrrp~ first admin bootstrap accepted for server owner 🐾", ephemeral=True)
-    await ensure_db_initialized()
-    async with db.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO admins(user_id) VALUES($1) ON CONFLICT (user_id) DO NOTHING",
-            str(member.id),
-        )
-    admins.add(str(member.id))
-    await send_interaction(interaction, f"mrrp~ {member.display_name} is now admin 🐾", ephemeral=True)
-
-
-@admin_group.command(name="admin_status", description="Show bot status for admins")
-async def admin_status(interaction: discord.Interaction):
-    if not await require_admin(interaction):
-        return
-    db_state = "ready" if db is not None else "not ready"
-    channel_id = str(interaction.channel_id or "0")
-    paused_state = "yes" if channel_id in paused_channels else "no"
-    await send_interaction(
-        interaction,
-        f"mrrp~ status 🐾\nDB: **{db_state}**\nmodels: **{', '.join(MODEL_CANDIDATES)}**\npaused here: **{paused_state}**\nautotalk check: **{AUTO_TALK_CHECK_SECONDS}s**",
-        ephemeral=True,
-    )
-
-
-@admin_group.command(name="remove_admin", description="Remove a user from admin")
-@app_commands.describe(member="The member to remove")
-async def admin_remove(interaction: discord.Interaction, member: discord.Member):
-    if not await require_admin(interaction):
-        return
-    await ensure_db_initialized()
-    async with db.acquire() as conn:
-        await conn.execute("DELETE FROM admins WHERE user_id=$1", str(member.id))
-    admins.discard(str(member.id))
-    await send_interaction(interaction, f"mrrp~ removed admin {member.display_name} 🐾", ephemeral=True)
-
-@admin_group.command(name="add_admin", description="Add a user as admin")
-@app_commands.describe(member="The member to add")
-async def admin_add(interaction: discord.Interaction, member: discord.Member):
-    if not await require_admin(interaction):
-        if not await can_bootstrap_admin(interaction):
-            return
-        await send_interaction(interaction, "mrrp~ first admin bootstrap accepted for server owner 🐾", ephemeral=True)
-    await ensure_db_initialized()
-    async with db.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO admins(user_id) VALUES($1) ON CONFLICT (user_id) DO NOTHING",
-            str(member.id),
-        )
-    admins.add(str(member.id))
-    await send_interaction(interaction, f"mrrp~ {member.display_name} is now admin 🐾", ephemeral=True)
-
-
-@admin_group.command(name="add_admin", description="Add a user as admin")
-@app_commands.describe(member="The member to add")
-async def admin_add(interaction: discord.Interaction, member: discord.Member):
-    if not await require_admin(interaction):
-        if not await can_bootstrap_admin(interaction):
-            return
-        await send_interaction(interaction, "mrrp~ first admin bootstrap accepted for server owner 🐾", ephemeral=True)
-    await ensure_db_initialized()
-    async with db.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO admins(user_id) VALUES($1) ON CONFLICT (user_id) DO NOTHING",
-            str(member.id),
-        )
-    admins.add(str(member.id))
-    await send_interaction(interaction, f"mrrp~ {member.display_name} is now admin 🐾", ephemeral=True)
-
-
-@admin_group.command(name="status", description="Show bot status for admins")
-async def admin_status(interaction: discord.Interaction):
-    if not await require_admin(interaction):
-        return
-    db_state = "ready" if db is not None else "not ready"
-    channel_id = str(interaction.channel_id or "0")
-    paused_state = "yes" if channel_id in paused_channels else "no"
-    await send_interaction(
-        interaction,
-        f"mrrp~ status 🐾\nDB: **{db_state}**\nmodels: **{', '.join(MODEL_CANDIDATES)}**\npaused here: **{paused_state}**\nautotalk check: **{AUTO_TALK_CHECK_SECONDS}s**",
-        ephemeral=True,
-    )
-
-
-@admin_group.command(name="remove_admin", description="Remove a user from admin")
-@app_commands.describe(member="The member to remove")
-async def admin_remove(interaction: discord.Interaction, member: discord.Member):
-    if not await require_admin(interaction):
-        return
-    await ensure_db_initialized()
-    async with db.acquire() as conn:
-        await conn.execute("DELETE FROM admins WHERE user_id=$1", str(member.id))
-    admins.discard(str(member.id))
-    await send_interaction(interaction, f"mrrp~ removed admin {member.display_name} 🐾", ephemeral=True)
-
-
-@admin_group.command(name="list", description="List admins")
-async def admin_list(interaction: discord.Interaction):
-    if not await require_admin(interaction):
-        return
-    if not admins:
-        await send_interaction(interaction, "mrrp~ no admins yet 🐾", ephemeral=True)
-        return
-    await send_interaction(interaction, "mrrp~ admins:\n" + "\n".join(f"<@{a}>" for a in sorted(admins)), ephemeral=True)
-
-@admin_group.command(name="admin_status", description="Show bot status for admins")
-async def admin_status(interaction: discord.Interaction):
-    if not await require_admin(interaction):
-        return
-    db_state = "ready" if db is not None else "not ready"
-    channel_id = str(interaction.channel_id or "0")
-    paused_state = "yes" if channel_id in paused_channels else "no"
-    await send_interaction(
-        interaction,
-        f"mrrp~ status 🐾\nDB: **{db_state}**\nmodels: **{', '.join(MODEL_CANDIDATES)}**\npaused here: **{paused_state}**\nautotalk check: **{AUTO_TALK_CHECK_SECONDS}s**",
-        ephemeral=True,
-    )
-
-@admin_group.command(name="list_admins", description="List admins")
-async def admin_list(interaction: discord.Interaction):
-    if not await require_admin(interaction):
-        return
-    if not admins:
-        await send_interaction(interaction, "mrrp~ no admins yet 🐾", ephemeral=True)
-        return
-    await send_interaction(interaction, "mrrp~ admins:\n" + "\n".join(f"<@{a}>" for a in sorted(admins)), ephemeral=True)
-@admin_group.command(name="add", description="Add a user as admin")
-@app_commands.describe(member="The member to add")
-async def admin_add(interaction: discord.Interaction, member: discord.Member):
-    if not await require_admin(interaction):
-        if not await can_bootstrap_admin(interaction):
-            return
-        await send_interaction(interaction, "mrrp~ first admin bootstrap accepted for server owner 🐾", ephemeral=True)
-    await ensure_db_initialized()
-    async with db.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO admins(user_id) VALUES($1) ON CONFLICT (user_id) DO NOTHING",
-            str(member.id),
-        )
-    admins.add(str(member.id))
-    await send_interaction(interaction, f"mrrp~ {member.display_name} is now admin 🐾", ephemeral=True)
-
-@admin_group.command(name="remove_admin", description="Remove a user from admin")
-@app_commands.describe(member="The member to remove")
-async def admin_remove(interaction: discord.Interaction, member: discord.Member):
-    if not await require_admin(interaction):
-        return
-    await ensure_db_initialized()
-    async with db.acquire() as conn:
-        await conn.execute("DELETE FROM admins WHERE user_id=$1", str(member.id))
-    admins.discard(str(member.id))
-    await send_interaction(interaction, f"mrrp~ removed admin {member.display_name} 🐾", ephemeral=True)
-
-@admin_group.command(name="status", description="Show bot status for admins")
-async def admin_status(interaction: discord.Interaction):
-    if not await require_admin(interaction):
-        return
-    db_state = "ready" if db is not None else "not ready"
-    channel_id = str(interaction.channel_id or "0")
-    paused_state = "yes" if channel_id in paused_channels else "no"
-    await send_interaction(
-        interaction,
-        f"mrrp~ status 🐾\nDB: **{db_state}**\nmodels: **{', '.join(MODEL_CANDIDATES)}**\npaused here: **{paused_state}**\nautotalk check: **{AUTO_TALK_CHECK_SECONDS}s**",
-        ephemeral=True,
-    )
-
-@admin_group.command(name="list_admins", description="List admins")
-async def admin_list(interaction: discord.Interaction):
-    if not await require_admin(interaction):
-        return
-    if not admins:
-        await send_interaction(interaction, "mrrp~ no admins yet 🐾", ephemeral=True)
-        return
-    await send_interaction(interaction, "mrrp~ admins:\n" + "\n".join(f"<@{a}>" for a in sorted(admins)), ephemeral=True)
-
-@admin_group.command(name="remove_admin", description="Remove a user from admin")
-@app_commands.describe(member="The member to remove")
-async def admin_remove(interaction: discord.Interaction, member: discord.Member):
-    if not await require_admin(interaction):
-        return
-    await ensure_db_initialized()
-    async with db.acquire() as conn:
-        await conn.execute("DELETE FROM admins WHERE user_id=$1", str(member.id))
-    admins.discard(str(member.id))
-    await send_interaction(interaction, f"mrrp~ removed admin {member.display_name} 🐾", ephemeral=True)
-
-@admin_group.command(name="add", description="Add a user as admin")
-@app_commands.describe(member="The member to add")
-async def admin_add(interaction: discord.Interaction, member: discord.Member):
-    if not await require_admin(interaction):
-        if not await can_bootstrap_admin(interaction):
-            return
-        await send_interaction(interaction, "mrrp~ first admin bootstrap accepted for server owner 🐾", ephemeral=True)
-    await ensure_db_initialized()
-    async with db.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO admins(user_id) VALUES($1) ON CONFLICT (user_id) DO NOTHING",
-            str(member.id),
-        )
-    admins.add(str(member.id))
-    await send_interaction(interaction, f"mrrp~ {member.display_name} is now admin 🐾", ephemeral=True)
-
-
-@admin_group.command(name="status", description="Show bot status for admins")
-async def admin_status(interaction: discord.Interaction):
-    if not await require_admin(interaction):
-        return
-    db_state = "ready" if db is not None else "not ready"
-    channel_id = str(interaction.channel_id or "0")
-    paused_state = "yes" if channel_id in paused_channels else "no"
-    await send_interaction(
-        interaction,
-        f"mrrp~ status 🐾\nDB: **{db_state}**\nmodels: **{', '.join(MODEL_CANDIDATES)}**\npaused here: **{paused_state}**\nautotalk check: **{AUTO_TALK_CHECK_SECONDS}s**",
-        ephemeral=True,
-    )
-
-
-@admin_group.command(name="remove", description="Remove a user from admin")
-@app_commands.describe(member="The member to remove")
-async def admin_remove(interaction: discord.Interaction, member: discord.Member):
-    if not await require_admin(interaction):
-        return
-    await ensure_db_initialized()
-    async with db.acquire() as conn:
-        return
-    await ensure_db_initialized()
-    async with db.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO admins(user_id) VALUES($1) ON CONFLICT (user_id) DO NOTHING",
-            str(member.id),
-        )
-    admins.add(str(member.id))
-    await send_interaction(interaction, f"mrrp~ {member.display_name} is now admin 🐾", ephemeral=True)
-
-
-@admin_group.command(name="remove", description="Remove a user from admin")
-@app_commands.describe(member="The member to remove")
-async def admin_remove(interaction: discord.Interaction, member: discord.Member):
-    if not await require_admin(interaction):
-        return
-    await ensure_db_initialized()
-    async with db.acquire() as conn:
-        await conn.execute("DELETE FROM admins WHERE user_id=$1", str(member.id))
-    admins.discard(str(member.id))
-    await send_interaction(interaction, f"mrrp~ removed admin {member.display_name} 🐾", ephemeral=True)
-
-
-@admin_group.command(name="list", description="List admins")
-async def admin_list(interaction: discord.Interaction):
-    if not await require_admin(interaction):
-        return
-    if not admins:
-        await send_interaction(interaction, "mrrp~ no admins yet 🐾", ephemeral=True)
-        return
-    await send_interaction(interaction, "mrrp~ admins:\n" + "\n".join(f"<@{a}>" for a in sorted(admins)), ephemeral=True)
-
-@admin_group.command(name="list_admins", description="List admins")
-async def admin_list(interaction: discord.Interaction):
-    if not await require_admin(interaction):
-        return
-    if not admins:
-        await send_interaction(interaction, "mrrp~ no admins yet 🐾", ephemeral=True)
-        return
-    await send_interaction(interaction, "mrrp~ admins:\n" + "\n".join(f"<@{a}>" for a in sorted(admins)), ephemeral=True)
-
-
 async def set_autotalk_for_guild(guild_id: int, enabled: bool):
     await set_autotalk_enabled(guild_id, enabled)
 
@@ -1546,6 +1208,7 @@ async def admin_autotalk_channel_clear(interaction: discord.Interaction):
 
 
 @admin_group.command(name="kick_member", description="Kick a member")
+@app_commands.default_permissions(administrator=True)
 @app_commands.describe(member="Member to kick", reason="Reason for kick", confirm="Must be true to confirm")
 async def admin_kick(interaction: discord.Interaction, member: discord.Member, confirm: bool = False, reason: str = "no reason"):
     if not await require_admin(interaction):
@@ -1558,6 +1221,7 @@ async def admin_kick(interaction: discord.Interaction, member: discord.Member, c
 
 
 @admin_group.command(name="ban_member", description="Ban a member")
+@app_commands.default_permissions(administrator=True)
 @app_commands.describe(member="Member to ban", reason="Reason for ban", confirm="Must be true to confirm")
 async def admin_ban(interaction: discord.Interaction, member: discord.Member, confirm: bool = False, reason: str = "no reason"):
     if not await require_admin(interaction):
@@ -1570,6 +1234,7 @@ async def admin_ban(interaction: discord.Interaction, member: discord.Member, co
 
 
 @admin_group.command(name="mute_member", description="Timeout (mute) a member")
+@app_commands.default_permissions(administrator=True)
 @app_commands.describe(member="Member to mute", minutes="Timeout length in minutes (1-10080)", reason="Reason for mute", confirm="Must be true to confirm")
 async def admin_mute(interaction: discord.Interaction, member: discord.Member, minutes: int = 10, confirm: bool = False, reason: str = "no reason"):
     if not await require_admin(interaction):
@@ -1584,52 +1249,7 @@ async def admin_mute(interaction: discord.Interaction, member: discord.Member, m
 
 
 @admin_group.command(name="clearhistory", description="Clear this channel's history")
-@app_commands.describe(confirm="Must be true to confirm")
-async def admin_clearhistory(interaction: discord.Interaction, confirm: bool = False):
-    if not await require_admin(interaction):
-        return
-    if not confirm:
-        await send_interaction(interaction, "mrrp~ set `confirm` to true to clear history here 🥺", ephemeral=True)
-        return
-    try:
-        await clear_channel_history(str(interaction.channel_id))
-        await send_interaction(interaction, "mrrp~ history cleared 🧹✨", ephemeral=True)
-    except Exception as e:
-        log_error("CLEAR HISTORY", e)
-        await send_interaction(interaction, "mrrp~ could not clear history 🥺", ephemeral=True)
-
-        return
-    await member.kick(reason=reason)
-    await send_interaction(interaction, f"mrrp~ kicked {member.display_name} 🐾", ephemeral=True)
-
-
-@admin_group.command(name="ban_member", description="Ban a member")
-@app_commands.describe(member="Member to ban", reason="Reason for ban", confirm="Must be true to confirm")
-async def admin_ban(interaction: discord.Interaction, member: discord.Member, confirm: bool = False, reason: str = "no reason"):
-    if not await require_admin(interaction):
-        return
-    if not confirm:
-        await send_interaction(interaction, "mrrp~ set `confirm` to true to ban this member 🥺", ephemeral=True)
-        return
-    await member.ban(reason=reason)
-    await send_interaction(interaction, f"mrrp~ banned {member.display_name} 💢", ephemeral=True)
-
-
-@admin_group.command(name="mute_member", description="Timeout (mute) a member")
-@app_commands.describe(member="Member to mute", minutes="Timeout length in minutes (1-10080)", reason="Reason for mute", confirm="Must be true to confirm")
-async def admin_mute(interaction: discord.Interaction, member: discord.Member, minutes: int = 10, confirm: bool = False, reason: str = "no reason"):
-    if not await require_admin(interaction):
-        return
-    if not confirm:
-        await send_interaction(interaction, "mrrp~ set `confirm` to true to mute this member 🥺", ephemeral=True)
-        return
-    minutes = max(1, min(10080, int(minutes)))
-    until = discord.utils.utcnow() + timedelta(minutes=minutes)
-    await member.timeout(until, reason=reason)
-    await send_interaction(interaction, f"mrrp~ muted {member.display_name} for **{minutes}** minute(s) 💤", ephemeral=True)
-
-
-@admin_group.command(name="clearhistory", description="Clear this channel's history")
+@app_commands.default_permissions(administrator=True)
 @app_commands.describe(confirm="Must be true to confirm")
 async def admin_clearhistory(interaction: discord.Interaction, confirm: bool = False):
     if not await require_admin(interaction):
@@ -1754,38 +1374,23 @@ async def admin_mood_reset(interaction: discord.Interaction):
 async def admin_pause_chat(interaction: discord.Interaction):
     if not await require_admin(interaction):
         return
-    channel_id = str(interaction.channel_id or interaction.user.id)
-    paused_channels.add(channel_id)
+    if interaction.channel is not None:
+        paused_channels.update(channel_pause_keys(interaction.channel))
+    else:
+        paused_channels.add(str(interaction.channel_id or interaction.user.id))
     await send_interaction(interaction, "mrrp~ chat paused in this channel 💤", ephemeral=True)
 
 
-@admin_group.command(name="mood_set", description="Set the bot mood for this channel")
-@app_commands.describe(mood="Choose: neutral, happy, soft, sleepy, playful")
-async def admin_mood_set(interaction: discord.Interaction, mood: str):
+@admin_group.command(name="resume_chat", description="Resume bot replies in this channel")
+async def admin_resume_chat(interaction: discord.Interaction):
     if not await require_admin(interaction):
         return
-    mood_value = mood.strip().lower()
-    if mood_value not in {"neutral", "happy", "soft", "sleepy", "playful"}:
-        await send_interaction(interaction, "mrrp~ mood must be one of: neutral, happy, soft, sleepy, playful 🐾", ephemeral=True)
-        return
-    channel_id = str(interaction.channel_id or interaction.user.id)
-    channel_mood[channel_id] = mood_value
-    await send_interaction(interaction, f"mrrp~ mood set to **{mood_value}** here 🐾", ephemeral=True)
-
-
-@admin_group.command(name="mood_reset", description="Reset mood to neutral for this channel")
-async def admin_mood_reset(interaction: discord.Interaction):
-    if not await require_admin(interaction):
-        return
-    channel_id = str(interaction.channel_id or interaction.user.id)
-    channel_mood[channel_id] = "neutral"
-    await send_interaction(interaction, "mrrp~ mood reset to **neutral** here 🐾", ephemeral=True)
-
-
-@admin_group.command(name="pause_chat", description="Pause bot replies in this channel")
-async def admin_pause_chat(interaction: discord.Interaction):
-    if not await require_admin(interaction):
-        return
+    if interaction.channel is not None:
+        for key in channel_pause_keys(interaction.channel):
+            paused_channels.discard(key)
+    else:
+        paused_channels.discard(str(interaction.channel_id or interaction.user.id))
+    await send_interaction(interaction, "mrrp~ chat resumed in this channel 🐾✨", ephemeral=True)
     channel_id = str(interaction.channel_id or interaction.user.id)
     paused_channels.add(channel_id)
     await send_interaction(interaction, "mrrp~ chat paused in this channel 💤", ephemeral=True)
