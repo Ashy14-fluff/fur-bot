@@ -90,6 +90,10 @@ STATUS_UPDATE_SECONDS = 120
 user_message_cooldown_seconds = 6.0
 USER_MESSAGE_COOLDOWN_SECONDS = 6
 
+# If Fur Bot just spoke in a channel, keep the conversation flowing
+# for a short window so other users can join without mentioning it.
+RECENT_CONVERSATION_WINDOW_SECONDS = 120
+
 SIM_THRESHOLD = 0.78
 MAX_REPEAT_RETRIES = 5
 RECENT_REPEAT_LIMIT = 8
@@ -460,6 +464,13 @@ def strip_trigger_text(message: discord.Message) -> str:
         text = text.replace(f"<@{bot.user.id}>", "")
         text = text.replace(f"<@!{bot.user.id}>", "")
     return text.strip()
+
+
+def should_continue_channel_conversation(channel_id: str, now: float) -> bool:
+    last_bot = channel_last_bot_talk.get(channel_id, 0.0)
+    if last_bot <= 0:
+        return False
+    return (now - last_bot) <= RECENT_CONVERSATION_WINDOW_SECONDS
 
 
 async def is_bot_reply(message: discord.Message) -> bool:
@@ -1836,8 +1847,9 @@ async def on_message(message: discord.Message):
     is_mention = bot.user is not None and bot.user.mentioned_in(message)
     reply_to_bot = await is_bot_reply(message)
     admin_bypass = await is_admin(user_id)
+    recent_channel_conversation = should_continue_channel_conversation(channel_id, now)
 
-    if not (is_dm or is_mention or reply_to_bot or admin_bypass):
+    if not (is_dm or is_mention or reply_to_bot or admin_bypass or recent_channel_conversation):
         await remember_topics(channel_id, message.content)
         return
 
