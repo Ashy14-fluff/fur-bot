@@ -90,6 +90,10 @@ STATUS_UPDATE_SECONDS = 120
 user_message_cooldown_seconds = 6.0
 USER_MESSAGE_COOLDOWN_SECONDS = 6
 
+# If Fur Bot just spoke in a channel, keep the conversation flowing
+# for a short window so other users can join without mentioning it.
+RECENT_CONVERSATION_WINDOW_SECONDS = 120
+
 SIM_THRESHOLD = 0.78
 MAX_REPEAT_RETRIES = 5
 RECENT_REPEAT_LIMIT = 8
@@ -251,7 +255,23 @@ async def init_db():
 
                 await conn.execute("""
                 ALTER TABLE guild_settings
+                ADD COLUMN IF NOT EXISTS admin_role_id TEXT
+                """)
+
+                await conn.execute("""
+                ALTER TABLE guild_settings
                 ADD COLUMN IF NOT EXISTS autotalk_channel_id TEXT
+                """)
+
+                await conn.execute("""
+                ALTER TABLE guild_settings
+                ADD COLUMN IF NOT EXISTS autotalk_enabled BOOLEAN NOT NULL DEFAULT TRUE
+                """)
+
+                await conn.execute("""
+                UPDATE guild_settings
+                SET autotalk_enabled = TRUE
+                WHERE autotalk_enabled IS NULL
                 """)
 
                 await conn.execute("""
@@ -487,6 +507,13 @@ def strip_trigger_text(message: discord.Message) -> str:
         text = text.replace(f"<@{bot.user.id}>", "")
         text = text.replace(f"<@!{bot.user.id}>", "")
     return text.strip()
+
+
+def should_continue_channel_conversation(channel_id: str, now: float) -> bool:
+    last_bot = channel_last_bot_talk.get(channel_id, 0.0)
+    if last_bot <= 0:
+        return False
+    return (now - last_bot) <= RECENT_CONVERSATION_WINDOW_SECONDS
 
 
 async def is_bot_reply(message: discord.Message) -> bool:
@@ -754,7 +781,7 @@ async def load_history(channel_id: str, limit: int = 20) -> List[dict]:
         async with db.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT role, content
+                SELECT role, content, user_id
                 FROM messages
                 WHERE channel_id=$1
                 ORDER BY id DESC
@@ -763,7 +790,7 @@ async def load_history(channel_id: str, limit: int = 20) -> List[dict]:
                 channel_id, limit
             )
         rows = list(reversed(rows))
-        return [{"role": r["role"], "content": r["content"]} for r in rows]
+        return [{"role": r["role"], "content": r["content"], "user_id": r["user_id"]} for r in rows]
     except Exception as e:
         log_error("DB LOAD", e)
         return []
@@ -1629,7 +1656,19 @@ Bot local time: {now_dt.strftime('%H:%M')}
     if recent_topics:
         messages.append({"role": "system", "content": "Recent channel topics:\n- " + "\n- ".join(recent_topics)})
 
-    messages.extend(history)
+    normalized_history: List[dict] = []
+    for item in history:
+        role = item.get("role", "user")
+        content = str(item.get("content", "")).strip()
+        msg_user_id = str(item.get("user_id", ""))
+        if not content:
+            continue
+        if role == "user":
+            speaker = username if msg_user_id == user_id else "another user"
+            content = f"[{speaker}] {content}"
+        normalized_history.append({"role": role, "content": content})
+
+    messages.extend(normalized_history)
     return messages
 
 # ================= RELATIONSHIP SIGNALS =================
@@ -1863,8 +1902,9 @@ async def on_message(message: discord.Message):
     is_mention = bot.user is not None and bot.user.mentioned_in(message)
     reply_to_bot = await is_bot_reply(message)
     admin_bypass = await is_admin(user_id)
+    recent_channel_conversation = should_continue_channel_conversation(channel_id, now)
 
-    if not (is_dm or is_mention or reply_to_bot or admin_bypass):
+    if not (is_dm or is_mention or reply_to_bot or admin_bypass or recent_channel_conversation):
         await remember_topics(channel_id, message.content)
         return
 
