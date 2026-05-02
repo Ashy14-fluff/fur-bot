@@ -989,6 +989,11 @@ async def load_admins():
 async def require_admin(interaction: discord.Interaction) -> bool:
     user_id = str(interaction.user.id)
 
+    # Restrict /admin commands to explicit bot-admins only.
+    # Guild owner/admin permissions are not enough by themselves.
+    if await is_admin(user_id):
+        return True
+
     # Bot owner and explicit bot-admin list are always trusted.
     if await is_admin(user_id):
         return True
