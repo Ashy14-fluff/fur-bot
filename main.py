@@ -138,7 +138,12 @@ class SafeGroup(app_commands.Group):
         return super().add_command(command, override=override)
 
 
-admin_group = SafeGroup(name="admin", description="Admin commands")
+class AdminGroup(SafeGroup):
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return await require_admin(interaction)
+
+
+admin_group = AdminGroup(name="admin", description="Admin commands")
 memory_group = SafeGroup(name="memory", description="Memory commands")
 bot.tree.add_command(admin_group)
 bot.tree.add_command(memory_group)
@@ -1228,11 +1233,26 @@ async def admin_autotalk_channel_clear(interaction: discord.Interaction):
     await send_interaction(interaction, "mrrp~ auto-talk channel cleared. set one again with /admin autotalk_channel 🐾", ephemeral=True)
 
 
+
+
+@admin_group.command(name="autotalk_channel_clear", description="Clear auto-talk channel for this server")
+async def admin_autotalk_channel_clear(interaction: discord.Interaction):
+    if not await require_admin(interaction):
+        return
+    if not interaction.guild:
+        await send_interaction(interaction, "mrrp~ this command works in a server only 🥺", ephemeral=True)
+        return
+    await set_autotalk_channel_id(interaction.guild.id, None)
+    await send_interaction(interaction, "mrrp~ auto-talk channel cleared. set one again with /admin autotalk_channel 🐾", ephemeral=True)
+
+
 @admin_group.command(name="kick_member", description="Kick a member")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(member="Member to kick", reason="Reason for kick", confirm="Must be true to confirm")
 async def admin_kick(interaction: discord.Interaction, member: discord.Member, confirm: bool = False, reason: str = "no reason"):
     if not await require_admin(interaction):
+        return
+    if not await require_moderation_permission(interaction, member):
         return
     if not await require_moderation_permission(interaction, member):
         return
