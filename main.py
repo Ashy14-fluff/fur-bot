@@ -738,7 +738,7 @@ async def load_history(channel_id: str, limit: int = 20) -> List[dict]:
         async with db.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT role, content
+                SELECT role, content, user_id
                 FROM messages
                 WHERE channel_id=$1
                 ORDER BY id DESC
@@ -747,7 +747,7 @@ async def load_history(channel_id: str, limit: int = 20) -> List[dict]:
                 channel_id, limit
             )
         rows = list(reversed(rows))
-        return [{"role": r["role"], "content": r["content"]} for r in rows]
+        return [{"role": r["role"], "content": r["content"], "user_id": r["user_id"]} for r in rows]
     except Exception as e:
         log_error("DB LOAD", e)
         return []
@@ -1613,7 +1613,19 @@ Bot local time: {now_dt.strftime('%H:%M')}
     if recent_topics:
         messages.append({"role": "system", "content": "Recent channel topics:\n- " + "\n- ".join(recent_topics)})
 
-    messages.extend(history)
+    normalized_history: List[dict] = []
+    for item in history:
+        role = item.get("role", "user")
+        content = str(item.get("content", "")).strip()
+        msg_user_id = str(item.get("user_id", ""))
+        if not content:
+            continue
+        if role == "user":
+            speaker = username if msg_user_id == user_id else "another user"
+            content = f"[{speaker}] {content}"
+        normalized_history.append({"role": role, "content": content})
+
+    messages.extend(normalized_history)
     return messages
 
 # ================= RELATIONSHIP SIGNALS =================
