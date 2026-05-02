@@ -553,6 +553,11 @@ async def get_channel_object(channel_id: str):
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     original = getattr(error, "original", error)
     log_error("APP COMMAND", original if isinstance(original, Exception) else Exception(str(original)))
+
+    # Avoid duplicate "no permission" replies when a command already sent one.
+    if isinstance(error, app_commands.CheckFailure) and interaction.response.is_done():
+        return
+
     msg = friendly_command_error_message(original if isinstance(original, Exception) else error)
     try:
         await send_interaction(interaction, msg, ephemeral=True)
@@ -1255,18 +1260,6 @@ async def admin_autotalk_channel(interaction: discord.Interaction, channel: disc
     await send_interaction(interaction, f"mrrp~ auto-talk channel set to {channel.mention} 🐾", ephemeral=True)
 
 
-@admin_group.command(name="autotalk_channel_clear", description="Clear auto-talk channel for this server")
-async def admin_autotalk_channel_clear(interaction: discord.Interaction):
-    if not await require_admin(interaction):
-        return
-    if not interaction.guild:
-        await send_interaction(interaction, "mrrp~ this command works in a server only 🥺", ephemeral=True)
-        return
-    await set_autotalk_channel_id(interaction.guild.id, None)
-    await send_interaction(interaction, "mrrp~ auto-talk channel cleared. set one again with /admin autotalk_channel 🐾", ephemeral=True)
-
-
-
 
 @admin_group.command(name="autotalk_channel_clear", description="Clear auto-talk channel for this server")
 async def admin_autotalk_channel_clear(interaction: discord.Interaction):
@@ -1299,29 +1292,6 @@ async def admin_kick(interaction: discord.Interaction, member: discord.Member, c
 @app_commands.describe(member="Member to ban", reason="Reason for ban", confirm="Must be true to confirm")
 async def admin_ban(interaction: discord.Interaction, member: discord.Member, confirm: bool = False, reason: str = "no reason"):
     if not await require_admin(interaction):
-        return
-    if not await require_moderation_permission(interaction, member):
-        return
-    if not await require_moderation_permission(interaction, member):
-        return
-    if not await require_moderation_permission(interaction, member):
-        return
-    if not await require_moderation_permission(interaction, member):
-        return
-    if not confirm:
-        await send_interaction(interaction, "mrrp~ set `confirm` to true to kick this member 🥺", ephemeral=True)
-        return
-    await member.kick(reason=reason)
-    await send_interaction(interaction, f"mrrp~ kicked {member.display_name} 🐾", ephemeral=True)
-
-
-@admin_group.command(name="ban_member", description="Ban a member")
-@app_commands.default_permissions(administrator=True)
-@app_commands.describe(member="Member to ban", reason="Reason for ban", confirm="Must be true to confirm")
-async def admin_ban(interaction: discord.Interaction, member: discord.Member, confirm: bool = False, reason: str = "no reason"):
-    if not await require_admin(interaction):
-        return
-    if not await require_moderation_permission(interaction, member):
         return
     if not await require_moderation_permission(interaction, member):
         return
@@ -1398,83 +1368,6 @@ async def admin_pause_chat(interaction: discord.Interaction):
     else:
         paused_channels.add(str(interaction.channel_id or interaction.user.id))
     await send_interaction(interaction, "mrrp~ chat paused in this channel 💤", ephemeral=True)
-
-
-@admin_group.command(name="mood_reset", description="Reset mood to neutral for this channel")
-async def admin_mood_reset(interaction: discord.Interaction):
-    if not await require_admin(interaction):
-        return
-    channel_id = str(interaction.channel_id or interaction.user.id)
-    channel_mood[channel_id] = "neutral"
-    await send_interaction(interaction, "mrrp~ mood reset to **neutral** here 🐾", ephemeral=True)
-
-
-@admin_group.command(name="pause_chat", description="Pause bot replies in this channel")
-async def admin_pause_chat(interaction: discord.Interaction):
-    if not await require_admin(interaction):
-        return
-    channel_id = str(interaction.channel_id or interaction.user.id)
-    paused_channels.add(channel_id)
-    await send_interaction(interaction, "mrrp~ chat paused in this channel 💤", ephemeral=True)
-
-@admin_group.command(name="mood_set", description="Set the bot mood for this channel")
-@app_commands.describe(mood="Choose: neutral, happy, soft, sleepy, playful")
-async def admin_mood_set(interaction: discord.Interaction, mood: str):
-    if not await require_admin(interaction):
-        return
-    mood_value = mood.strip().lower()
-    if mood_value not in {"neutral", "happy", "soft", "sleepy", "playful"}:
-        await send_interaction(interaction, "mrrp~ mood must be one of: neutral, happy, soft, sleepy, playful 🐾", ephemeral=True)
-        return
-    channel_id = str(interaction.channel_id or interaction.user.id)
-    channel_mood[channel_id] = mood_value
-    await send_interaction(interaction, f"mrrp~ mood set to **{mood_value}** here 🐾", ephemeral=True)
-
-
-@admin_group.command(name="mood_reset", description="Reset mood to neutral for this channel")
-async def admin_mood_reset(interaction: discord.Interaction):
-    if not await require_admin(interaction):
-        return
-    channel_id = str(interaction.channel_id or interaction.user.id)
-    channel_mood[channel_id] = "neutral"
-    await send_interaction(interaction, "mrrp~ mood reset to **neutral** here 🐾", ephemeral=True)
-
-
-@admin_group.command(name="pause_chat", description="Pause bot replies in this channel")
-async def admin_pause_chat(interaction: discord.Interaction):
-    if not await require_admin(interaction):
-        return
-    if interaction.channel is not None:
-        paused_channels.update(channel_pause_keys(interaction.channel))
-    else:
-        paused_channels.add(str(interaction.channel_id or interaction.user.id))
-    await send_interaction(interaction, "mrrp~ chat paused in this channel 💤", ephemeral=True)
-
-
-@admin_group.command(name="resume_chat", description="Resume bot replies in this channel")
-async def admin_resume_chat(interaction: discord.Interaction):
-    if not await require_admin(interaction):
-        return
-    if interaction.channel is not None:
-        for key in channel_pause_keys(interaction.channel):
-            paused_channels.discard(key)
-    else:
-        paused_channels.discard(str(interaction.channel_id or interaction.user.id))
-    await send_interaction(interaction, "mrrp~ chat resumed in this channel 🐾✨", ephemeral=True)
-    channel_id = str(interaction.channel_id or interaction.user.id)
-    paused_channels.add(channel_id)
-    await send_interaction(interaction, "mrrp~ chat paused in this channel 💤", ephemeral=True)
-
-@admin_group.command(name="resume_chat", description="Resume bot replies in this channel")
-async def admin_resume_chat(interaction: discord.Interaction):
-    if not await require_admin(interaction):
-        return
-    if interaction.channel is not None:
-        for key in channel_pause_keys(interaction.channel):
-            paused_channels.discard(key)
-    else:
-        paused_channels.discard(str(interaction.channel_id or interaction.user.id))
-    await send_interaction(interaction, "mrrp~ chat resumed in this channel 🐾✨", ephemeral=True)
 
 
 @bot.tree.command(name="topic", description="Show the channel's current tracked topic")
