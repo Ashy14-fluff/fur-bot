@@ -988,6 +988,12 @@ async def load_admins():
 
 async def require_admin(interaction: discord.Interaction) -> bool:
     user_id = str(interaction.user.id)
+
+    # Bot owner is always trusted.
+    if bot_owner_id is not None and int(user_id) == bot_owner_id:
+        return True
+
+    # Guild-side checks for slash commands in servers.
     if bot_owner_id is not None and int(user_id) == bot_owner_id:
     if await is_admin(user_id):
         return True
@@ -1010,6 +1016,9 @@ async def require_admin(interaction: discord.Interaction) -> bool:
         # Only allow DB-backed admins in guilds if they also have Manage Guild.
         if user_id in admins and member.guild_permissions.manage_guild:
             return True
+
+    # Outside guilds (e.g. DMs), allow explicit bot-admin list.
+    if interaction.guild is None and user_id in admins:
     else:
         # Outside guilds (e.g. DMs), allow explicit bot-admin list.
         if user_id in admins:
@@ -1018,6 +1027,7 @@ async def require_admin(interaction: discord.Interaction) -> bool:
     if user_id in admins and interaction.guild is None:
     if user_id in admins:
         return True
+
     await send_interaction(interaction, "mrrp~ no permission 🥺", ephemeral=True)
     return False
 
@@ -1261,6 +1271,23 @@ async def admin_autotalk_channel_clear(interaction: discord.Interaction):
 @app_commands.describe(member="Member to kick", reason="Reason for kick", confirm="Must be true to confirm")
 async def admin_kick(interaction: discord.Interaction, member: discord.Member, confirm: bool = False, reason: str = "no reason"):
     if not await require_admin(interaction):
+        return
+    if not await require_moderation_permission(interaction, member):
+        return
+    if not confirm:
+        await send_interaction(interaction, "mrrp~ set `confirm` to true to kick this member 🥺", ephemeral=True)
+        return
+    await member.kick(reason=reason)
+    await send_interaction(interaction, f"mrrp~ kicked {member.display_name} 🐾", ephemeral=True)
+
+
+@admin_group.command(name="ban_member", description="Ban a member")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(member="Member to ban", reason="Reason for ban", confirm="Must be true to confirm")
+async def admin_ban(interaction: discord.Interaction, member: discord.Member, confirm: bool = False, reason: str = "no reason"):
+    if not await require_admin(interaction):
+        return
+    if not await require_moderation_permission(interaction, member):
         return
     if not await require_moderation_permission(interaction, member):
         return
