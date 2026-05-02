@@ -515,6 +515,20 @@ async def send_interaction(interaction: discord.Interaction, content: str, *, ep
         await interaction.response.send_message(content, ephemeral=ephemeral, allowed_mentions=discord.AllowedMentions.none())
 
 
+def friendly_command_error_message(error: Exception) -> str:
+    if isinstance(error, app_commands.CheckFailure):
+        return "mrrp~ no permission for dat command 🥺"
+    if isinstance(error, app_commands.CommandOnCooldown):
+        return f"mrrp~ dat command is on cooldown, try again in {error.retry_after:.1f}s 🐾"
+    if isinstance(error, (app_commands.TransformerError, app_commands.CommandSignatureMismatch)):
+        return "mrrp~ wrong input format, pwease check the command options and try again 🐾"
+    if isinstance(error, discord.Forbidden):
+        return "mrrp~ command failed because me lacks Discord permissions here 🥺"
+    if isinstance(error, discord.HTTPException):
+        return "mrrp~ command failed to send to Discord API, pwease try again in a bit 🐾"
+    return "mrrp~ command didn't work this time, pwease try again 🥺"
+
+
 async def get_channel_object(channel_id: str):
     try:
         ch = bot.get_channel(int(channel_id))
@@ -526,6 +540,17 @@ async def get_channel_object(channel_id: str):
         return await bot.fetch_channel(int(channel_id))
     except Exception:
         return None
+
+
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    original = getattr(error, "original", error)
+    log_error("APP COMMAND", original if isinstance(original, Exception) else Exception(str(original)))
+    msg = friendly_command_error_message(original if isinstance(original, Exception) else error)
+    try:
+        await send_interaction(interaction, msg, ephemeral=True)
+    except Exception:
+        pass
 
 # ================= TOPIC TRACKING =================
 TOPIC_STOPWORDS = {
