@@ -553,6 +553,11 @@ async def get_channel_object(channel_id: str):
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     original = getattr(error, "original", error)
     log_error("APP COMMAND", original if isinstance(original, Exception) else Exception(str(original)))
+
+    # Avoid duplicate "no permission" replies when a command already sent one.
+    if isinstance(error, app_commands.CheckFailure) and interaction.response.is_done():
+        return
+
     msg = friendly_command_error_message(original if isinstance(original, Exception) else error)
     try:
         await send_interaction(interaction, msg, ephemeral=True)
