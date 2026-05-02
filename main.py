@@ -145,8 +145,10 @@ class AdminGroup(SafeGroup):
 
 admin_group = AdminGroup(name="admin", description="Admin commands")
 memory_group = SafeGroup(name="memory", description="Memory commands")
+setup_group = SafeGroup(name="setup", description="Setup commands")
 bot.tree.add_command(admin_group)
 bot.tree.add_command(memory_group)
+bot.tree.add_command(setup_group)
 
 # ================= ERROR LOGGING =================
 def log_error(where: str, exc: Exception):
@@ -994,6 +996,9 @@ async def require_admin(interaction: discord.Interaction) -> bool:
     if await is_admin(user_id):
         return True
 
+    if await is_admin(user_id):
+        return True
+
     # Bot owner and explicit bot-admin list are always trusted.
     if await is_admin(user_id):
         return True
@@ -1092,13 +1097,31 @@ async def memory_forgetme(interaction: discord.Interaction):
         await send_interaction(interaction, "mrrp~ could not forget dat right now 🥺", ephemeral=True)
 
 
+@setup_group.command(name="bootstrap_admin", description="Initialize first bot-admin (server owner only)")
+@app_commands.describe(member="The member to make the first bot-admin")
+async def setup_bootstrap_admin(interaction: discord.Interaction, member: discord.Member):
+    if await require_admin(interaction):
+        await send_interaction(interaction, "mrrp~ bot-admins already exist; use /admin add_admin instead 🐾", ephemeral=True)
+        return
+    if not await can_bootstrap_admin(interaction):
+        await send_interaction(interaction, "mrrp~ only the server owner can bootstrap first admin 🥺", ephemeral=True)
+        return
+
+    await ensure_db_initialized()
+    async with db.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO admins(user_id) VALUES($1) ON CONFLICT (user_id) DO NOTHING",
+            str(member.id),
+        )
+    admins.add(str(member.id))
+    await send_interaction(interaction, f"mrrp~ first bot-admin set to {member.display_name} 🐾", ephemeral=True)
+
+
 @admin_group.command(name="add_admin", description="Add a user as admin")
 @app_commands.describe(member="The member to add")
 async def admin_add(interaction: discord.Interaction, member: discord.Member):
     if not await require_admin(interaction):
-        if not await can_bootstrap_admin(interaction):
-            return
-        await send_interaction(interaction, "mrrp~ first admin bootstrap accepted for server owner 🐾", ephemeral=True)
+        return
     await ensure_db_initialized()
     async with db.acquire() as conn:
         await conn.execute(
