@@ -994,6 +994,30 @@ async def require_admin(interaction: discord.Interaction) -> bool:
     if await is_admin(user_id):
         return True
 
+    # Bot owner and explicit bot-admin list are always trusted.
+    if await is_admin(user_id):
+        return True
+
+    # Guild-side checks for slash commands in servers.
+    if interaction.guild and isinstance(interaction.user, discord.Member):
+        member = interaction.user
+        if interaction.guild.owner_id == member.id:
+            return True
+        if member.guild_permissions.administrator:
+            return True
+
+        role_id = await get_guild_admin_role_id(interaction.guild.id)
+        if role_id and any(r.id == role_id for r in member.roles):
+            return True
+
+        role_by_name = discord.utils.get(member.roles, name=ADMIN_ROLE_NAME)
+        if role_by_name is not None:
+            return True
+
+        # Allow DB-backed admins in guilds if they also have Manage Guild.
+        if user_id in admins and member.guild_permissions.manage_guild:
+            return True
+
     await send_interaction(interaction, "mrrp~ no permission 🥺", ephemeral=True)
     return False
 
