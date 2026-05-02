@@ -1014,6 +1014,27 @@ async def can_bootstrap_admin(interaction: discord.Interaction) -> bool:
         return False
     return interaction.guild.owner_id == interaction.user.id
 
+
+async def require_moderation_permission(interaction: discord.Interaction, target: discord.Member) -> bool:
+    if not interaction.guild or not isinstance(interaction.user, discord.Member):
+        await send_interaction(interaction, "mrrp~ this command only works in a server 🥺", ephemeral=True)
+        return False
+
+    actor = interaction.user
+    if not actor.guild_permissions.administrator and interaction.guild.owner_id != actor.id:
+        await send_interaction(interaction, "mrrp~ only server admins can use moderation commands 🥺", ephemeral=True)
+        return False
+
+    if target.id == interaction.guild.owner_id:
+        await send_interaction(interaction, "mrrp~ me can't moderate the server owner 🥺", ephemeral=True)
+        return False
+
+    if target.guild_permissions.administrator and interaction.guild.owner_id != actor.id:
+        await send_interaction(interaction, "mrrp~ only the server owner can moderate another admin 🥺", ephemeral=True)
+        return False
+
+    return True
+
 # ================= MEMORY / ADMIN COMMANDS =================
 @memory_group.command(name="remember", description="Store a fact about you")
 @app_commands.describe(fact="Something Fur Bot should remember")
@@ -1213,6 +1234,8 @@ async def admin_autotalk_channel_clear(interaction: discord.Interaction):
 async def admin_kick(interaction: discord.Interaction, member: discord.Member, confirm: bool = False, reason: str = "no reason"):
     if not await require_admin(interaction):
         return
+    if not await require_moderation_permission(interaction, member):
+        return
     if not confirm:
         await send_interaction(interaction, "mrrp~ set `confirm` to true to kick this member 🥺", ephemeral=True)
         return
@@ -1226,6 +1249,8 @@ async def admin_kick(interaction: discord.Interaction, member: discord.Member, c
 async def admin_ban(interaction: discord.Interaction, member: discord.Member, confirm: bool = False, reason: str = "no reason"):
     if not await require_admin(interaction):
         return
+    if not await require_moderation_permission(interaction, member):
+        return
     if not confirm:
         await send_interaction(interaction, "mrrp~ set `confirm` to true to ban this member 🥺", ephemeral=True)
         return
@@ -1238,6 +1263,8 @@ async def admin_ban(interaction: discord.Interaction, member: discord.Member, co
 @app_commands.describe(member="Member to mute", minutes="Timeout length in minutes (1-10080)", reason="Reason for mute", confirm="Must be true to confirm")
 async def admin_mute(interaction: discord.Interaction, member: discord.Member, minutes: int = 10, confirm: bool = False, reason: str = "no reason"):
     if not await require_admin(interaction):
+        return
+    if not await require_moderation_permission(interaction, member):
         return
     if not confirm:
         await send_interaction(interaction, "mrrp~ set `confirm` to true to mute this member 🥺", ephemeral=True)
@@ -1286,38 +1313,7 @@ async def admin_mood_reset(interaction: discord.Interaction):
     channel_id = str(interaction.channel_id or interaction.user.id)
     channel_mood[channel_id] = "neutral"
     await send_interaction(interaction, "mrrp~ mood reset to **neutral** here 🐾", ephemeral=True)
-@admin_group.command(name="mood_set", description="Set the bot mood for this channel")
-@app_commands.describe(mood="Choose: neutral, happy, soft, sleepy, playful")
-async def admin_mood_set(interaction: discord.Interaction, mood: str):
-    if not await require_admin(interaction):
-        return
-    mood_value = mood.strip().lower()
-    if mood_value not in {"neutral", "happy", "soft", "sleepy", "playful"}:
-        await send_interaction(interaction, "mrrp~ mood must be one of: neutral, happy, soft, sleepy, playful 🐾", ephemeral=True)
-        return
-    channel_id = str(interaction.channel_id or interaction.user.id)
-    channel_mood[channel_id] = mood_value
-    await send_interaction(interaction, f"mrrp~ mood set to **{mood_value}** here 🐾", ephemeral=True)
 
-@admin_group.command(name="mood_reset", description="Reset mood to neutral for this channel")
-async def admin_mood_reset(interaction: discord.Interaction):
-    if not await require_admin(interaction):
-        return
-    channel_id = str(interaction.channel_id or interaction.user.id)
-    channel_mood[channel_id] = "neutral"
-    await send_interaction(interaction, "mrrp~ mood reset to **neutral** here 🐾", ephemeral=True)
-@admin_group.command(name="mood_set", description="Set the bot mood for this channel")
-@app_commands.describe(mood="Choose: neutral, happy, soft, sleepy, playful")
-async def admin_mood_set(interaction: discord.Interaction, mood: str):
-    if not await require_admin(interaction):
-        return
-    mood_value = mood.strip().lower()
-    if mood_value not in {"neutral", "happy", "soft", "sleepy", "playful"}:
-        await send_interaction(interaction, "mrrp~ mood must be one of: neutral, happy, soft, sleepy, playful 🐾", ephemeral=True)
-        return
-    channel_id = str(interaction.channel_id or interaction.user.id)
-    channel_mood[channel_id] = mood_value
-    await send_interaction(interaction, f"mrrp~ mood set to **{mood_value}** here 🐾", ephemeral=True)
 
 @admin_group.command(name="pause_chat", description="Pause bot replies in this channel")
 async def admin_pause_chat(interaction: discord.Interaction):
