@@ -145,8 +145,10 @@ class AdminGroup(SafeGroup):
 
 admin_group = AdminGroup(name="admin", description="Admin commands")
 memory_group = SafeGroup(name="memory", description="Memory commands")
+setup_group = SafeGroup(name="setup", description="Setup commands")
 bot.tree.add_command(admin_group)
 bot.tree.add_command(memory_group)
+bot.tree.add_command(setup_group)
 
 # ================= ERROR LOGGING =================
 def log_error(where: str, exc: Exception):
@@ -989,43 +991,9 @@ async def load_admins():
 async def require_admin(interaction: discord.Interaction) -> bool:
     user_id = str(interaction.user.id)
 
-    # Bot owner is always trusted.
-    if bot_owner_id is not None and int(user_id) == bot_owner_id:
-        return True
-
-    # Guild-side checks for slash commands in servers.
-    if bot_owner_id is not None and int(user_id) == bot_owner_id:
+    # Restrict /admin commands to explicit bot-admins only.
+    # Guild owner/admin permissions are not enough by themselves.
     if await is_admin(user_id):
-        return True
-
-    if interaction.guild and isinstance(interaction.user, discord.Member):
-        member = interaction.user
-        if interaction.guild.owner_id == member.id:
-            return True
-        if member.guild_permissions.administrator:
-            return True
-
-        role_id = await get_guild_admin_role_id(interaction.guild.id)
-        if role_id and any(r.id == role_id for r in member.roles):
-            return True
-
-        role_by_name = discord.utils.get(member.roles, name=ADMIN_ROLE_NAME)
-        if role_by_name is not None:
-            return True
-
-        # Only allow DB-backed admins in guilds if they also have Manage Guild.
-        if user_id in admins and member.guild_permissions.manage_guild:
-            return True
-
-    # Outside guilds (e.g. DMs), allow explicit bot-admin list.
-    if interaction.guild is None and user_id in admins:
-    else:
-        # Outside guilds (e.g. DMs), allow explicit bot-admin list.
-        if user_id in admins:
-            return True
-
-    if user_id in admins and interaction.guild is None:
-    if user_id in admins:
         return True
 
     await send_interaction(interaction, "mrrp~ no permission 🥺", ephemeral=True)
@@ -1102,13 +1070,31 @@ async def memory_forgetme(interaction: discord.Interaction):
         await send_interaction(interaction, "mrrp~ could not forget dat right now 🥺", ephemeral=True)
 
 
+@setup_group.command(name="bootstrap_admin", description="Initialize first bot-admin (server owner only)")
+@app_commands.describe(member="The member to make the first bot-admin")
+async def setup_bootstrap_admin(interaction: discord.Interaction, member: discord.Member):
+    if await require_admin(interaction):
+        await send_interaction(interaction, "mrrp~ bot-admins already exist; use /admin add_admin instead 🐾", ephemeral=True)
+        return
+    if not await can_bootstrap_admin(interaction):
+        await send_interaction(interaction, "mrrp~ only the server owner can bootstrap first admin 🥺", ephemeral=True)
+        return
+
+    await ensure_db_initialized()
+    async with db.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO admins(user_id) VALUES($1) ON CONFLICT (user_id) DO NOTHING",
+            str(member.id),
+        )
+    admins.add(str(member.id))
+    await send_interaction(interaction, f"mrrp~ first bot-admin set to {member.display_name} 🐾", ephemeral=True)
+
+
 @admin_group.command(name="add_admin", description="Add a user as admin")
 @app_commands.describe(member="The member to add")
 async def admin_add(interaction: discord.Interaction, member: discord.Member):
     if not await require_admin(interaction):
-        if not await can_bootstrap_admin(interaction):
-            return
-        await send_interaction(interaction, "mrrp~ first admin bootstrap accepted for server owner 🐾", ephemeral=True)
+        return
     await ensure_db_initialized()
     async with db.acquire() as conn:
         await conn.execute(
